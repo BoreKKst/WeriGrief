@@ -1,0 +1,28 @@
+# Virtual environment
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment & secrets
+.env
+*.pem
+*.key
+credentials.json
+service_account.json
+token.json
+
+# Logs & runtime state
+*.log
+sheets_state.json
+scratch/
+.system_generated/
+
+# Local secrets and private files
+.env.*
+!.env.template
+google-sheets.json
+*.sqlite3
+*.db
