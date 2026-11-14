@@ -5,11 +5,11 @@ Interactive Discord UI Views: support ticket buttons and server rules components
 import re
 import asyncio
 import discord
-from src.core.config import log, GUILD_ID
+from src.core.config import log, GUILD_ID, SUPPORT_CATEGORY_ID, SUPPORT_LINK_GUILD_ID, SUPPORT_LINK_CHANNEL_ID
+from src.services.permissions import StaffRoleManager, ROLE_HELPER
 
 SUPPORT_LABEL = "\u2800\u2002Поддержка\u2002\u2800"
-SUPPORT_CATEGORY_ID = 1526050614151348314
-STAFF_ROLE_ID = 1554583527486390272
+STAFF_ROLE_ID = ROLE_HELPER
 
 
 class TicketControlView(discord.ui.View):
@@ -21,7 +21,7 @@ class TicketControlView(discord.ui.View):
     @discord.ui.button(label="Закрыть тикет", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="ticket_close_button")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button | None = None):
         user_roles = [r.id for r in getattr(interaction.user, "roles", [])]
-        is_staff = any(r in {1554582347872079914, 1569338896448356372, 1554582667000021125, 1554582767965311068, 1569194858982285433, 1569195073814405140, 1554582998928859176, 1554583247902605312, 1554583311568085113, 1570415032091807815, 1554583443650912409, 1569198191541362841, 1554583527486390272, 1564330724482355330} for r in user_roles)
+        is_staff = any(StaffRoleManager.is_staff_role(role) for role in getattr(interaction.user, "roles", []))
         is_admin = getattr(interaction.user.guild_permissions, "administrator", False)
         is_author = interaction.channel and str(interaction.user.id) in (interaction.channel.topic or "")
 
@@ -159,7 +159,7 @@ class RulesView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(discord.ui.Button(
             label=SUPPORT_LABEL,
-            url="https://discord.com/channels/1526050613643968522/1526050614436433970",
+            url=f"https://discord.com/channels/{SUPPORT_LINK_GUILD_ID}/{SUPPORT_LINK_CHANNEL_ID}",
             style=discord.ButtonStyle.link,
             row=0
         ))

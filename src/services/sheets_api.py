@@ -11,6 +11,7 @@ import re
 import time
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from google.oauth2.service_account import Credentials
@@ -100,6 +101,7 @@ class SheetsMonitor:
         self.last_playtime_date: str = ""  # YYYY-MM-DD of the last daily playtime check
         self.custom_exempt_staff: list[str] = []  # nicks exempt from norm by admin command
         self.mc_playtime_snapshots: dict[str, dict] = {}  # { nick_low: { "hours": float, "date": str, "timestamp": float } }
+        self.vacations: dict[str, dict] = {}
         self._state_file = Path(__file__).resolve().parent / "sheets_state.json"
 
         # Authenticate with read/write credentials
@@ -175,6 +177,8 @@ class SheetsMonitor:
                     self.custom_exempt_staff = data.get("custom_exempt_staff", [])
                 if "mc_playtime_snapshots" in data:
                     self.mc_playtime_snapshots = data.get("mc_playtime_snapshots", {})
+                if "vacations" in data:
+                    self.vacations = data.get("vacations", {})
                 log.info(f"Loaded state: {len(self.known_warnings)} warnings, {len(self.known_staff)} staff, {len(self.dismissed_history)} dismissed records, month: {self.last_reset_month}, exempt: {len(self.custom_exempt_staff)}")
             except Exception as e:
                 log.warning(f"Failed to load state: {e}")
@@ -185,6 +189,7 @@ class SheetsMonitor:
                 self.last_playtime_date = ""
                 self.custom_exempt_staff = []
                 self.mc_playtime_snapshots = {}
+                self.vacations = {}
 
     def _save_state(self):
         try:
@@ -198,6 +203,7 @@ class SheetsMonitor:
                         "last_playtime_date": self.last_playtime_date,
                         "custom_exempt_staff": self.custom_exempt_staff,
                         "mc_playtime_snapshots": self.mc_playtime_snapshots,
+                        "vacations": self.vacations,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -417,9 +423,10 @@ class SheetsMonitor:
                 log.info(f"Staff member {old_copy['nick']} dismissed by {old_copy['removed_by']}: automatically cleared {warns_cleared} warnings from sheets")
                 removed.append(old_copy)
 
-        if appointed or promoted or removed:
-            self.known_staff = current_map
-            self._save_state()
+        # Google Sheets is the source of truth: refresh the complete local comparison
+        # snapshot on every poll, even when no personnel changes were detected.
+        self.known_staff = current_map
+        self._save_state()
 
         return {
             "appointed": appointed,
@@ -452,7 +459,7 @@ class SheetsMonitor:
                 self.sheets.values()
                 .get(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"'{STAFF_SHEET}'!A1:A50",
+                    range=f"'{STAFF_SHEET}'!A:A",
                 )
                 .execute()
             )
@@ -525,23 +532,23 @@ class SheetsMonitor:
             for s in current_staff:
                 if s.get("nick") and s["nick"].lower() == target_low:
                     log.warning(f"Staff member {nick_clean} already exists in '{STAFF_SHEET}'")
-                    return s
+                    return None
 
+            # A nick, B position, C Discord username, D Telegram/VK,
+            # E played hours, F warnings (matches the current Google Sheet).
             row_data = [
                 nick_clean,
                 position.strip(),
-                discord_name.strip(),
+                discord_name.strip().lstrip("@"),
                 telegram.strip(),
-                comment.strip(),
-                "0",  # invited
-                "0",  # hours
-                "0",  # warns
+                "0",  # played hours
+                "0",  # warnings
             ]
 
             body = {"values": [row_data]}
             self.sheets.values().append(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{STAFF_SHEET}'!A:H",
+                range=f"'{STAFF_SHEET}'!A:F",
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
                 body=body,
@@ -628,8 +635,8 @@ class SheetsMonitor:
                 range=f"'{WARNINGS_SHEET}'!A2:D500",
             ).execute()
 
-            # Note: Column H in 'Списки' has the formula =COUNTIF('Учет предупреждений'!$A:$A; A...),
-            # so Google Sheets automatically recalculates counts to 0 without touching the formulas!
+            # Column F ('Предупреждения') is a COUNTIF formula over 'Учет предупреждений';
+            # Google Sheets recalculates the count automatically after clearing warning rows.
 
             # 2. Update state
             self.known_warnings = []
@@ -706,6 +713,7 @@ class SheetsMonitor:
             self.known_warnings = [self._row_key(r) for r in kept_rows if _is_complete_warn_row(r)]
             self._save_state()
 
+            self._update_staff_warning_count(target_nick, 0)
             log.info(f"Cleared {removed_count} warning(s) for player {target_nick}")
             return removed_count
         except Exception as e:
@@ -820,6 +828,7 @@ class SheetsMonitor:
                 )
             )
 
+            self._update_staff_warning_count(target_nick, remaining_count)
             log.info(f"Removed warning #{case_num} for {target_nick}: {removed_info['reason']} (remaining: {remaining_count})")
             return True, removed_info, remaining_count
         except Exception as e:
@@ -829,8 +838,8 @@ class SheetsMonitor:
     def increment_staff_hours(self, deltas: dict[str, float]) -> dict[str, float]:
         """
         deltas: { nick_low: delta_hours_float }
-        Reads current hours in Column G of 'Списки', adds delta_hours,
-        and updates Column G with the new sum.
+        Reads current hours in Column E of 'Списки', adds delta_hours,
+        and updates Column E with the new sum.
         Returns { nick_low: new_hours_float }
         """
         try:
@@ -838,7 +847,7 @@ class SheetsMonitor:
                 self.sheets.values()
                 .get(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"'{STAFF_SHEET}'!A1:G50",
+                    range=f"'{STAFF_SHEET}'!A:E",
                 )
                 .execute()
             )
@@ -850,7 +859,7 @@ class SheetsMonitor:
                     nick = resolve_email_to_nick(str(r[0]).strip()).lower()
                     if nick in deltas:
                         delta = deltas[nick]
-                        curr_str = str(r[6]).strip() if len(r) > 6 and r[6] else "0"
+                        curr_str = str(r[4]).strip() if len(r) > 4 and r[4] else "0"
                         try:
                             curr_val = float(curr_str.replace(",", "."))
                         except ValueError:
@@ -860,7 +869,7 @@ class SheetsMonitor:
                         # Format as int if whole number, else 1 decimal place
                         val_str = str(int(round(new_val))) if abs(new_val - round(new_val)) < 0.05 else f"{new_val:.1f}"
                         data.append({
-                            "range": f"'{STAFF_SHEET}'!G{idx}",
+                            "range": f"'{STAFF_SHEET}'!E{idx}",
                             "values": [[val_str]]
                         })
             if data:
@@ -919,14 +928,14 @@ class SheetsMonitor:
     def update_multiple_staff_hours(self, hours_map: dict[str, str]) -> int:
         """
         hours_map: { nick_low: hours_str }
-        Updates Column G ('Кол-во отыгранных часов') in 'Списки' for all matching staff.
+        Updates Column E ('Кол-во отыгранных часов') in 'Списки' for all matching staff.
         """
         try:
             res = (
                 self.sheets.values()
                 .get(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"'{STAFF_SHEET}'!A1:A50",
+                    range=f"'{STAFF_SHEET}'!A:A",
                 )
                 .execute()
             )
@@ -938,7 +947,7 @@ class SheetsMonitor:
                     nick = resolve_email_to_nick(str(r[0]).strip()).lower()
                     if nick in hours_map:
                         data.append({
-                            "range": f"'{STAFF_SHEET}'!G{idx}",
+                            "range": f"'{STAFF_SHEET}'!E{idx}",
                             "values": [[hours_map[nick]]]
                         })
                         updated_count += 1
@@ -952,6 +961,32 @@ class SheetsMonitor:
         except Exception as e:
             log.error(f"Failed to update staff hours in sheets: {e}")
             return 0
+
+    def _update_staff_warning_count(self, nick: str, count: int) -> bool:
+        """Synchronizes warning count to column F without touching columns A:E."""
+        try:
+            target = nick.strip().lower()
+            target_compact = target.replace("_", "")
+            result = self.sheets.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{STAFF_SHEET}'!A:F",
+            ).execute()
+            for row_idx, row in enumerate(result.get("values", [])[1:], start=2):
+                if not row or not str(row[0]).strip():
+                    continue
+                current = resolve_email_to_nick(str(row[0]).strip()).lower()
+                if current == target or current.replace("_", "") == target_compact:
+                    self.sheets.values().update(
+                        spreadsheetId=self.spreadsheet_id,
+                        range=f"'{STAFF_SHEET}'!F{row_idx}",
+                        valueInputOption="USER_ENTERED",
+                        body={"values": [[str(max(0, int(count)))]]},
+                    ).execute()
+                    return True
+            return False
+        except Exception as exc:
+            log.error("Failed to synchronize warning count for %s: %s", nick, exc)
+            return False
 
     def add_warning(self, nick: str, date: str, reason: str, issuer: str) -> int:
         """
@@ -1015,11 +1050,12 @@ class SheetsMonitor:
                 if _is_complete_warn_row(r) and str(r[0]).strip().lower() == nick.lower():
                     total_player_warns += 1
 
+            self._update_staff_warning_count(nick, total_player_warns)
             log.info(f"Added warning for {nick}: {reason} (by {issuer}, total: {total_player_warns})")
             return total_player_warns
         except Exception as e:
             log.error(f"Error adding warning for {nick}: {e}")
-            return 1
+            return 0
 
     def get_warnings_for(self, query: str) -> dict:
         """
@@ -1084,13 +1120,110 @@ class SheetsMonitor:
             "staff_info": matched_staff,
         }
 
+    def update_staff_position(self, target_nick: str, new_position: str) -> dict | None:
+        """Меняет только колонку B (должность) у сотрудника в листе «Списки»."""
+        try:
+            target_low = target_nick.strip().lower()
+            result = self.sheets.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{STAFF_SHEET}'!A:B",
+            ).execute()
+            rows = result.get("values", [])
+            for row_idx, row in enumerate(rows[1:], start=2):
+                if row and resolve_email_to_nick(str(row[0]).strip()).lower() == target_low:
+                    old_position = str(row[1]).strip() if len(row) > 1 else ""
+                    self.sheets.values().update(
+                        spreadsheetId=self.spreadsheet_id,
+                        range=f"'{STAFF_SHEET}'!B{row_idx}",
+                        valueInputOption="USER_ENTERED",
+                        body={"values": [[new_position]]},
+                    ).execute()
+                    updated = next((x for x in self.get_staff_list()
+                                    if x.get("nick", "").lower() == target_low), None)
+                    if updated:
+                        self.known_staff[target_low] = updated
+                    self._save_state()
+                    return {"nick": target_nick, "old_position": old_position,
+                            "new_position": new_position}
+            return None
+        except Exception as e:
+            log.error(f"Failed to update staff position for {target_nick}: {e}")
+            return None
+
+    def create_vacation(self, nick: str, days: int) -> dict:
+        """Отпуск на 1–15 дней; повторный отпуск доступен через 13 дней после окончания."""
+        from datetime import date, timedelta
+        key = nick.strip().lower()
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+        current = self.vacations.get(key, {})
+        end_raw = current.get("end")
+        if current.get("start") and end_raw:
+            try:
+                previous_end = date.fromisoformat(end_raw)
+                if today <= previous_end:
+                    raise ValueError(f"Отпуск уже активен до {previous_end.strftime('%d.%m.%Y')}")
+                next_allowed = previous_end + timedelta(days=13)
+                if today < next_allowed:
+                    raise ValueError(f"Повторный отпуск доступен с {next_allowed.strftime('%d.%m.%Y')}")
+            except ValueError as exc:
+                if str(exc).startswith(("Отпуск уже", "Повторный")):
+                    raise
+        if not 1 <= int(days) <= 15:
+            raise ValueError("Можно оформить от 1 до 15 дней.")
+        end_date = today + timedelta(days=int(days) - 1)
+        entry = {"start": today.isoformat(), "end": end_date.isoformat(),
+                 "days": int(days), "created_at": datetime.now(timezone.utc).isoformat()}
+        self.vacations[key] = entry
+        self._save_state()
+        return entry
+
+    def is_on_vacation(self, nick: str, on_date=None) -> bool:
+        from datetime import date
+        entry = self.vacations.get(nick.strip().lower(), {})
+        try:
+            current = on_date or datetime.now(ZoneInfo("Europe/Moscow")).date()
+            return date.fromisoformat(entry["start"]) <= current <= date.fromisoformat(entry["end"])
+        except Exception:
+            return False
+
+    def get_vacation(self, nick: str) -> dict | None:
+        return self.vacations.get(nick.strip().lower())
+
+    def update_staff_discord_username(self, target_nick: str, username: str) -> bool:
+        """Write current Discord username (not numeric ID) into column C."""
+        try:
+            target_low = target_nick.strip().lower()
+            username = username.strip().lstrip("@")
+            if not username:
+                return False
+            result = self.sheets.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{STAFF_SHEET}'!A:C",
+            ).execute()
+            for row_idx, row in enumerate(result.get("values", [])[1:], start=2):
+                if row and resolve_email_to_nick(str(row[0]).strip()).lower() == target_low:
+                    current = str(row[2]).strip().lstrip("@") if len(row) > 2 else ""
+                    if current == username:
+                        return True
+                    self.sheets.values().update(
+                        spreadsheetId=self.spreadsheet_id,
+                        range=f"'{STAFF_SHEET}'!C{row_idx}",
+                        valueInputOption="RAW",
+                        body={"values": [[username]]},
+                    ).execute()
+                    return True
+            return False
+        except Exception as e:
+            log.error(f"Failed to update Discord username for {target_nick}: {e}")
+            return False
+
     def get_staff_list(self) -> list[dict]:
-        """Fetch current staff list from 'Списки' sheet."""
+        """Fetch current staff list from 'Списки' sheet (A:F layout)."""
         result = (
             self.sheets.values()
             .get(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{STAFF_SHEET}'!A1:H100",
+                range=f"'{STAFF_SHEET}'!A:F",
             )
             .execute()
         )
@@ -1116,12 +1249,10 @@ class SheetsMonitor:
                 entry = {
                     "nick": nick,
                     "position": str(row[1]).strip() if len(row) > 1 else "",
-                    "discord": str(row[2]).strip() if len(row) > 2 else "",
+                    "discord": str(row[2]).strip().lstrip("@") if len(row) > 2 else "",
                     "telegram": str(row[3]).strip() if len(row) > 3 else "",
-                    "comment": str(row[4]).strip() if len(row) > 4 else "",
-                    "invited": str(row[5]).strip() if len(row) > 5 else "0",
-                    "hours": str(row[6]).strip() if len(row) > 6 else "0",
-                    "warns": str(row[7]).strip() if len(row) > 7 else "0",
+                    "hours": str(row[4]).strip() if len(row) > 4 else "0",
+                    "warns": str(row[5]).strip() if len(row) > 5 else "0",
                     "email": email,
                 }
                 staff.append(entry)

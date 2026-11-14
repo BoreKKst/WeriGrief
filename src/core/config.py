@@ -26,7 +26,31 @@ log = logging.getLogger("werigrief_staff")
 TOKEN = os.getenv("BOT_TOKEN", "")
 GUILD_ID = int(os.getenv("GUILD_ID", "1554536535247032401") or "1554536535247032401")
 WARN_NOTIFY_CHANNEL = int(os.getenv("WARN_NOTIFY_CHANNEL", "0") or "0")
-STAFF_NOTIFY_CHANNEL = int(os.getenv("STAFF_NOTIFY_CHANNEL", "0") or "0")
+STAFF_NOTIFY_CHANNEL = int(os.getenv("STAFF_NOTIFY_CHANNEL", "1554580639083397161") or "1554580639083397161")
+if STAFF_NOTIFY_CHANNEL <= 0:
+    STAFF_NOTIFY_CHANNEL = 1554580639083397161  # Канал «Персонал» из конфигурации WeriGrief
+
+# Discord IDs extracted from the current WeriGrief archive (no IDs inferred).
+ROLE_IDS = {
+    "creator": 1554582347872079914,
+    "gl_owner": 1569338896448356372,
+    "owner": 1554582667000021125,
+    "gl_curator": 1554582767965311068,
+    "curator": 1569194858982285433,
+    "z_curator": 1569195073814405140,
+    "gl_admin": 1554582998928859176,
+    "admin": 1554583247902605312,
+    "gl_moder": 1554583311568085113,
+    "st_moder": 1570415032091807815,
+    "moder": 1554583443650912409,
+    "ml_moder": 1569198191541362841,
+    "ml_admin": 1571090715386183692,
+    "helper": 1554583527486390272,
+    "project_team": 1564330724482355330,
+}
+SUPPORT_CATEGORY_ID = 1526050614151348314
+SUPPORT_LINK_GUILD_ID = 1526050613643968522
+SUPPORT_LINK_CHANNEL_ID = 1526050614436433970
 
 # ─── Настройки Google Sheets ──────────────────────────────
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "").strip()
@@ -42,6 +66,7 @@ PTERO_SERVER_IDS = [
 MAIN_MC_SERVER_ID = os.getenv("MAIN_MC_SERVER_ID", "83bed7ed")
 GAME_SERVERS = [s.strip() for s in os.getenv("GAME_SERVERS", "83bed7ed").split(",") if s.strip()]
 DAILY_NORM_HOURS = float(os.getenv("DAILY_NORM_HOURS", "1.0"))
+MC_STATS_DIRECTORY = os.getenv("MC_STATS_DIRECTORY", "world/stats").strip().strip("/")
 
 # ─── Статический реестр персонала (Static Staff Registry) ─
 STAFF_REGISTRY = {
@@ -53,10 +78,17 @@ STAFF_REGISTRY = {
 }
 
 # ─── Права и ключевые слова руководства ────────────────────
-LEADERSHIP_ROLES = ["creator", "gl.owner", "owner", "gl.curator", "curator", "z.curator", "руковод"]
-ADMIN_KEYWORDS = [
-    "creator", "gl.owner", "owner", "gl.curator", "curator", "z.curator",
-    "gl.admin", "admin", "gl.moder", "st.moder", "moder", "ml.moder",
+LEADERSHIP_ROLES = [
+    "creator", "gl.owner", "owner", "d.owner", "gl.curator", "curator", "z.curator",
 ]
-LEADERSHIP_IDS = set()  # Add trusted Discord user IDs here only if needed.
+ADMIN_KEYWORDS = [
+    "creator", "gl.owner", "owner", "d.owner", "gl.curator", "curator", "z.curator",
+    "gl.admin", "admin", "ml.admin", "d.admin",
+    "gl.moder", "st.moder", "moder", "ml.moder", "d.moder",
+]
+# Прямой доступ к кадровым командам для владельцев проекта.
+LEADERSHIP_IDS = {
+    1374053953301385308,  # BoreKKst
+    1279748957358002276,  # fenix_763
+}
 

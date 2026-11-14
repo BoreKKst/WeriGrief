@@ -26,3 +26,33 @@ scratch/
 google-sheets.json
 *.sqlite3
 *.db
+google-sheets.json
+
+# Secrets and private data
+.env
+.env.*
+!.env.example
+*token*
+*secret*
+*credentials*
+service-account*.json
+google-credentials*.json
+*.pem
+*.key
+
+# Runtime and local data
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+logs/
+*.db
+*.sqlite
+*.sqlite3
+sheets_state.json
+
+# Backup files
+*.bak
+*.before_*
+WeriGrief-StaffBot/

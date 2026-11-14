@@ -3,32 +3,35 @@ Discord roles management and Minecraft LuckPerms permission synchronization via 
 """
 
 import re
+import asyncio
+import json
 import aiohttp
 import discord
 from src.core.config import (
-    log, PTERO_API_KEY, PTERO_BASE_URL, PTERO_SERVER_IDS
+    log, PTERO_API_KEY, PTERO_BASE_URL, PTERO_SERVER_IDS, ROLE_IDS
 )
 
 # Роли персонала WeriGrief. Project Team — только Discord, без группы LuckPerms.
-ROLE_CREATOR = 1554582347872079914
-ROLE_GL_OWNER = 1569338896448356372
-ROLE_OWNER = 1554582667000021125
-ROLE_GL_CURATOR = 1554582767965311068
-ROLE_CURATOR = 1569194858982285433
-ROLE_Z_CURATOR = 1569195073814405140
-ROLE_GL_ADMIN = 1554582998928859176
-ROLE_ADMIN = 1554583247902605312
-ROLE_GL_MODER = 1554583311568085113
-ROLE_ST_MODER = 1570415032091807815
-ROLE_MODER = 1554583443650912409
-ROLE_ML_MODER = 1569198191541362841
-ROLE_HELPER = 1554583527486390272
-ROLE_PROJECT_TEAM = 1564330724482355330
+ROLE_CREATOR = ROLE_IDS["creator"]
+ROLE_GL_OWNER = ROLE_IDS["gl_owner"]
+ROLE_OWNER = ROLE_IDS["owner"]
+ROLE_GL_CURATOR = ROLE_IDS["gl_curator"]
+ROLE_CURATOR = ROLE_IDS["curator"]
+ROLE_Z_CURATOR = ROLE_IDS["z_curator"]
+ROLE_GL_ADMIN = ROLE_IDS["gl_admin"]
+ROLE_ADMIN = ROLE_IDS["admin"]
+ROLE_GL_MODER = ROLE_IDS["gl_moder"]
+ROLE_ST_MODER = ROLE_IDS["st_moder"]
+ROLE_MODER = ROLE_IDS["moder"]
+ROLE_ML_MODER = ROLE_IDS["ml_moder"]
+ROLE_ML_ADMIN = ROLE_IDS["ml_admin"]
+ROLE_HELPER = ROLE_IDS["helper"]
+ROLE_PROJECT_TEAM = ROLE_IDS["project_team"]
 
 STAFF_ROLE_IDS = {
     ROLE_CREATOR, ROLE_GL_OWNER, ROLE_OWNER, ROLE_GL_CURATOR, ROLE_CURATOR,
     ROLE_Z_CURATOR, ROLE_GL_ADMIN, ROLE_ADMIN, ROLE_GL_MODER, ROLE_ST_MODER,
-    ROLE_MODER, ROLE_ML_MODER, ROLE_HELPER, ROLE_PROJECT_TEAM,
+    ROLE_MODER, ROLE_ML_MODER, ROLE_ML_ADMIN, ROLE_HELPER, ROLE_PROJECT_TEAM,
 }
 
 STAFF_ROLE_KEYWORDS = (
@@ -37,21 +40,22 @@ STAFF_ROLE_KEYWORDS = (
 )
 
 # Отдельной базовой роли персонала в новой системе нет.
-BASE_STAFF_ROLE_ID = 0
+BASE_STAFF_ROLE_ID = ROLE_PROJECT_TEAM
 
 POSITION_DISCORD_ROLES_MAP = {
     "creator": ROLE_CREATOR, "devolper": ROLE_CREATOR, "developer": ROLE_CREATOR,
-    "gl.owner": ROLE_GL_OWNER, "gowner": ROLE_GL_OWNER,
+    "gl.owner": ROLE_GL_OWNER, "gl owner": ROLE_GL_OWNER, "gowner": ROLE_GL_OWNER,
     "owner": ROLE_OWNER,
-    "gl.curator": ROLE_GL_CURATOR, "gcurator": ROLE_GL_CURATOR,
+    "gl.curator": ROLE_GL_CURATOR, "gl curator": ROLE_GL_CURATOR, "gcurator": ROLE_GL_CURATOR, "g.curator": ROLE_GL_CURATOR, "g curator": ROLE_GL_CURATOR,
     "curator": ROLE_CURATOR,
-    "z.curator": ROLE_Z_CURATOR, "zcurator": ROLE_Z_CURATOR,
-    "gl.admin": ROLE_GL_ADMIN, "gadmin": ROLE_GL_ADMIN,
+    "z.curator": ROLE_Z_CURATOR, "z curator": ROLE_Z_CURATOR, "zcurator": ROLE_Z_CURATOR,
+    "gl.admin": ROLE_GL_ADMIN, "gl admin": ROLE_GL_ADMIN, "gadmin": ROLE_GL_ADMIN,
     "admin": ROLE_ADMIN,
-    "gl.moder": ROLE_GL_MODER, "glmoder": ROLE_GL_MODER,
-    "st.moder": ROLE_ST_MODER, "stmoder": ROLE_ST_MODER,
+    "ml.admin": ROLE_ML_ADMIN, "ml admin": ROLE_ML_ADMIN, "mladmin": ROLE_ML_ADMIN,
+    "gl.moder": ROLE_GL_MODER, "gl moder": ROLE_GL_MODER, "glmoder": ROLE_GL_MODER,
+    "st.moder": ROLE_ST_MODER, "st moder": ROLE_ST_MODER, "stmoder": ROLE_ST_MODER,
     "moder": ROLE_MODER,
-    "ml.moder": ROLE_ML_MODER, "mlmoder": ROLE_ML_MODER,
+    "ml.moder": ROLE_ML_MODER, "ml moder": ROLE_ML_MODER, "mlmoder": ROLE_ML_MODER,
     "helper": ROLE_HELPER, "хелпер": ROLE_HELPER,
     "project team": ROLE_PROJECT_TEAM,
 }
@@ -65,21 +69,34 @@ ALL_LP_GROUPS = {
 
 POSITION_LUCKPERMS_MAP = {
     "creator": "devolper", "devolper": "devolper", "developer": "devolper",
-    "gl.owner": "gowner", "gowner": "gowner",
+    "разработчик": "devolper", "гл.разработчик": "devolper",
+    "gl.owner": "gowner", "gl owner": "gowner", "gowner": "gowner",
     "owner": "owner",
-    "gl.curator": "gcurator", "gcurator": "gcurator",
+    "gl.curator": "gcurator", "gl curator": "gcurator", "gcurator": "gcurator", "g.curator": "gcurator", "g curator": "gcurator",
     "curator": "curator",
-    "z.curator": "zcurator", "zcurator": "zcurator",
-    "gl.admin": "gadmin", "gadmin": "gadmin",
+    "z.curator": "zcurator", "z curator": "zcurator", "zcurator": "zcurator",
+    "gl.admin": "gadmin", "gl admin": "gadmin", "gadmin": "gadmin",
     "admin": "admin",
-    "gl.moder": "glmoder", "glmoder": "glmoder",
-    "st.moder": "stmoder", "stmoder": "stmoder",
+    "gl.moder": "glmoder", "gl moder": "glmoder", "glmoder": "glmoder",
+    "st.moder": "stmoder", "st moder": "stmoder", "stmoder": "stmoder",
     "moder": "moder",
-    "ml.moder": "mlmoder", "mlmoder": "mlmoder",
+    "ml.moder": "mlmoder", "ml moder": "mlmoder", "mlmoder": "mlmoder", "ml admin": "mladmin", "mladmin": "mladmin",
     "helper": "helper", "хелпер": "helper",
     # Project Team — Discord-only, не выдаём Minecraft-группу.
 }
 
+
+
+
+# Порядок должностей для /promote и /demote — от младшей к старшей.
+# ML ADMIN имеет отдельную Discord-роль WeriGrief.
+POSITION_ORDER = [
+    "HELPER", "D.HELPER", "ML.MODER", "MODER", "ST.MODER", "GL.MODER", "D.MODER",
+    "ML.ADMIN", "ADMIN", "GL.ADMIN", "D.ADMIN", "Z.CURATOR", "CURATOR",
+    "GL.CURATOR", "OWNER", "D.OWNER", "GL.OWNER", "CREATOR",
+    "Разработчик", "Гл.Разработчик", "PR Manager",
+    "Сотрудник проекта", "На испытании", "Кандидат",
+]
 
 class StaffRoleManager:
     """Класс управления ролями персонала в Discord."""
@@ -87,33 +104,47 @@ class StaffRoleManager:
     @staticmethod
     def is_staff_role(role: discord.Role) -> bool:
         """Проверяет, относится ли роль Discord к иерархии персонала."""
+        # Только точные ID ролей WeriGrief. Не трогаем донатные и прочие роли.
         if role.id in STAFF_ROLE_IDS:
             return True
-        if role.managed or role.is_default():
-            return False
-        name = role.name.lower()
-        if any(k in name for k in STAFF_ROLE_KEYWORDS):
-            return True
-        if 22 <= role.position <= 36:
-            return True
-        return False
+        normalized = role.name.casefold()
+        return normalized in {
+            "creator", "gl.owner", "owner", "d.owner", "gl.curator", "curator",
+            "z.curator", "gl.admin", "admin", "ml.admin", "d.admin", "gl.moder",
+            "st.moder", "moder", "ml.moder", "d.moder", "helper", "d.helper",
+            "гл.разработчик", "разработчик", "pr manager", "сотрудник проекта",
+            "на испытании", "кандидат",
+        }
 
     @staticmethod
     def find_staff_role_for_position(guild: discord.Guild, position: str) -> discord.Role | None:
-        """Ищет подходящую роль Discord для указанной должности."""
-        pos_low = position.strip().lower()
-        if pos_low in POSITION_DISCORD_ROLES_MAP:
-            role = guild.get_role(POSITION_DISCORD_ROLES_MAP[pos_low])
+        """Ищет роль сначала по реальному ID WeriGrief, затем по точному имени роли."""
+        pos = position.strip()
+        pos_low = pos.casefold()
+        role_id = POSITION_DISCORD_ROLES_MAP.get(pos_low)
+        if role_id:
+            role = guild.get_role(role_id)
             if role:
                 return role
-        for key in sorted(POSITION_DISCORD_ROLES_MAP.keys(), key=len, reverse=True):
-            if key in pos_low:
-                role = guild.get_role(POSITION_DISCORD_ROLES_MAP[key])
-                if role:
-                    return role
-        for role in guild.roles:
-            r_name = role.name.lower()
-            if pos_low in r_name and not role.managed and not role.is_default():
+        # Некоторые должности присутствуют в требованиях, но в исходниках архива
+        # для них нет ID. Не выдумываем ID — ищем точное имя на самом сервере.
+        exact_names = {
+            "gl.owner": ("GL.OWNER",), "d.owner": ("D.OWNER",),
+            "gl.curator": ("GL.CURATOR",), "z.curator": ("Z.CURATOR",),
+            "gl.admin": ("GL.ADMIN",), "ml.admin": ("ML.ADMIN",), "d.admin": ("D.ADMIN",),
+            "gl.moder": ("GL.MODER",), "st.moder": ("ST.MODER",),
+            "ml.moder": ("ML.MODER",), "d.moder": ("D.MODER",),
+            "d.helper": ("D.HELPER",), "helper": ("HELPER",),
+            "creator": ("CREATOR",), "developer": ("Разработчик",),
+            "главный разработчик": ("Гл.Разработчик",),
+            "pr manager": ("PR Manager",), "сотрудник проекта": ("Сотрудник проекта",),
+            "на испытании": ("На испытании", "⚠️ На испытании"),
+            "кандидат": ("Кандидат",),
+        }
+        candidates = exact_names.get(pos_low, (pos,))
+        for candidate in candidates:
+            role = discord.utils.get(guild.roles, name=candidate)
+            if role:
                 return role
         return None
 
@@ -182,20 +213,18 @@ class StaffRoleManager:
 
         # Базовая роль персонала
         base_role = guild.get_role(BASE_STAFF_ROLE_ID)
-        if not base_role:
-            for r in guild.roles:
-                if "сотрудник проекта" in r.name.lower():
-                    base_role = r
-                    break
-
         if base_role and base_role not in member.roles:
             if bot_member and base_role.position >= bot_top_pos:
                 blocked.append(base_role.name)
             else:
                 to_add.append(base_role)
+        elif base_role is None:
+            blocked.append(f"Не найдена базовая роль с ID {BASE_STAFF_ROLE_ID}")
 
         # Роль должности
         pos_role = cls.find_staff_role_for_position(guild, position)
+        if pos_role is None:
+            blocked.append(f"Discord-роль не настроена: {position}")
         if pos_role and pos_role not in member.roles:
             if bot_member and pos_role.position >= bot_top_pos:
                 blocked.append(pos_role.name)
@@ -208,10 +237,13 @@ class StaffRoleManager:
             if old_role and old_role in member.roles and old_role != pos_role:
                 if bot_member and old_role.position < bot_top_pos:
                     try:
-                        await member.remove_roles(old_role, reason=f"Повышение: {old_position} -> {position}")
+                        await member.remove_roles(old_role, reason=f"Изменение должности: {old_position} -> {position}")
                         log.info(f"Removed old role '{old_role.name}' from {member}")
                     except Exception as e:
+                        blocked.append(old_role.name)
                         log.warning(f"Failed to remove old role '{old_role.name}' from {member}: {e}")
+                else:
+                    blocked.append(old_role.name)
 
         if to_add:
             try:
@@ -232,12 +264,122 @@ class StaffRoleManager:
 
 
 class MinecraftPermissionsManager:
-    """Класс синхронизации прав в Minecraft (LuckPerms) через Pterodactyl API."""
+    """Синхронизация Minecraft через Pterodactyl Client WebSocket API."""
+
+    @staticmethod
+    async def _send_console_commands(server_id: str, commands: list[str]) -> bool:
+        """Authenticate through Pterodactyl Client API and send commands to server console.
+
+        PTERO_API_KEY must be a CLIENT key (usually starts with ptlc_), not an
+        Application key (ptla_). We keep the socket open briefly so console output
+        and explicit command errors can be collected instead of claiming success
+        immediately after writing to the websocket.
+        """
+        from src.core.config import PTERO_API_KEY, PTERO_BASE_URL
+        if not PTERO_API_KEY:
+            log.error("Minecraft command not sent: PTERO_API_KEY is empty")
+            return False
+        if PTERO_API_KEY.startswith("ptla_"):
+            log.error("Minecraft command not sent: PTERO_API_KEY is an Application API key (ptla_). A Client API key (ptlc_) is required for /api/client/servers/.../websocket.")
+            return False
+        headers = {
+            "Authorization": f"Bearer {PTERO_API_KEY}",
+            "Accept": "application/json",
+        }
+        endpoint = f"{PTERO_BASE_URL.rstrip('/')}/api/client/servers/{server_id}/websocket"
+        try:
+            timeout = aiohttp.ClientTimeout(total=25)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(endpoint, headers=headers) as response:
+                    if response.status != 200:
+                        body = await response.text()
+                        log.error("Pterodactyl websocket-token request failed: server=%s status=%s body=%s", server_id, response.status, body[:500])
+                        return False
+                    payload = await response.json(content_type=None)
+                data = payload.get("data", {})
+                socket_url = data.get("socket")
+                token = data.get("token")
+                if not socket_url or not token:
+                    log.error("Pterodactyl response missing socket/token for server %s: %s", server_id, str(payload)[:500])
+                    return False
+                async with session.ws_connect(socket_url, heartbeat=20) as ws:
+                    await ws.send_json({"event": "auth", "args": [token]})
+                    authenticated = False
+                    deadline = asyncio.get_running_loop().time() + 8
+                    while asyncio.get_running_loop().time() < deadline:
+                        try:
+                            msg = await ws.receive(timeout=1.5)
+                        except asyncio.TimeoutError:
+                            continue
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                event = json.loads(msg.data)
+                            except (TypeError, ValueError):
+                                continue
+                            if event.get("event") == "auth success":
+                                authenticated = True
+                                break
+                            if event.get("event") in {"jwt error", "token expired"}:
+                                log.error("Pterodactyl console auth rejected for %s: %s", server_id, event)
+                                return False
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+                    if not authenticated:
+                        log.error("Pterodactyl console authentication timed out for server %s", server_id)
+                        return False
+
+                    for command in commands:
+                        await ws.send_json({"event": "send command", "args": [command]})
+                        log.info("Minecraft console command queued on %s: %s", server_id, command[:180])
+                        await asyncio.sleep(0.25)
+
+                    # Read console output briefly. Pterodactyl does not provide a
+                    # per-command acknowledgement, but this catches obvious errors.
+                    output_lines = []
+                    idle_deadline = asyncio.get_running_loop().time() + 2.5
+                    while asyncio.get_running_loop().time() < idle_deadline:
+                        try:
+                            msg = await ws.receive(timeout=0.6)
+                        except asyncio.TimeoutError:
+                            continue
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                event = json.loads(msg.data)
+                            except (TypeError, ValueError):
+                                continue
+                            if event.get("event") == "console output":
+                                args = event.get("args") or []
+                                if args:
+                                    output_lines.append(str(args[0])[:500])
+                            elif event.get("event") in {"jwt error", "token expired"}:
+                                log.error("Pterodactyl websocket token expired during command on %s", server_id)
+                                return False
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+                    if output_lines:
+                        joined = " | ".join(output_lines[-8:])
+                        log.info("Minecraft console output from %s: %s", server_id, joined[:2000])
+                        if any(term in joined.casefold() for term in ("unknown command", "неизвестная команда", "not found", "no player was found", "player not found")):
+                            log.error("Minecraft rejected command on %s: %s", server_id, joined[:1000])
+                            return False
+                    return True
+        except Exception as exc:
+            log.exception("Pterodactyl console websocket failed for server %s: %s", server_id, exc)
+            return False
 
     @staticmethod
     def get_luckperms_group(position: str) -> str:
-        """Сопоставляет название должности с группой LuckPerms."""
-        pos_low = position.strip().lower()
+        """Сопоставляет должность с группой LuckPerms; LP_GROUP_MAP из .env имеет приоритет."""
+        import os
+        pos_low = position.strip().casefold()
+        try:
+            custom = json.loads(os.getenv("LP_GROUP_MAP", "{}") or "{}")
+            if isinstance(custom, dict):
+                normalized = {str(k).strip().casefold(): str(v).strip() for k, v in custom.items()}
+                if normalized.get(pos_low):
+                    return normalized[pos_low]
+        except (TypeError, ValueError):
+            log.error("LP_GROUP_MAP must be valid JSON object, e.g. {\"D.ADMIN\":\"admin\"}")
         if pos_low in POSITION_LUCKPERMS_MAP:
             return POSITION_LUCKPERMS_MAP[pos_low]
         for key in sorted(POSITION_LUCKPERMS_MAP.keys(), key=len, reverse=True):
@@ -250,86 +392,64 @@ class MinecraftPermissionsManager:
 
     @classmethod
     async def grant_minecraft_permissions(cls, nick: str, position: str) -> tuple[bool, str]:
-        """Выдаёт игроку группу прав LuckPerms на серверах через Pterodactyl API."""
+        """Выдаёт игроку группу LuckPerms через консоль Pterodactyl WebSocket."""
+        from src.core.config import PTERO_SERVER_IDS
         group = cls.get_luckperms_group(position)
         if not group:
             log.info("No Minecraft group mapped for position '%s'; skipping LuckPerms grant", position)
             return False, ""
-
-        if not PTERO_API_KEY:
-            log.warning("PTERO_API_KEY not configured, skipping Minecraft permissions grant")
-            return False, group
-
-        clean_nick = re.sub(r"[^\w]", "", nick)
+        clean_nick = re.sub(r"[^A-Za-z0-9_]", "", str(nick or ""))
         if not clean_nick:
             return False, group
-        commands = [
-            f"lp user {clean_nick} parent set {group}",
-            "lp sync",
-        ]
-
+        commands = [f"lp user {clean_nick} parent set {group}", "lp sync"]
         success = False
-        headers = {
-            "Authorization": f"Bearer {PTERO_API_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-
-        async with aiohttp.ClientSession() as session:
-            for srv_id in PTERO_SERVER_IDS:
-                try:
-                    srv_success = True
-                    for cmd in commands:
-                        url = f"{PTERO_BASE_URL}/api/client/servers/{srv_id}/command"
-                        async with session.post(url, json={"command": cmd}, headers=headers, timeout=5) as resp:
-                            if resp.status not in (204, 200):
-                                srv_success = False
-                    if srv_success:
-                        success = True
-                        log.info(f"Granted Minecraft group '{group}' to {clean_nick} on server {srv_id}")
-                except Exception as e:
-                    log.debug(f"Ptero grant command failed on server {srv_id}: {e}")
-
+        for server_id in PTERO_SERVER_IDS:
+            if await cls._send_console_commands(server_id, commands):
+                success = True
+                log.info("LuckPerms grant command sent for %s on server %s", clean_nick, server_id)
         return success, group
 
     @classmethod
     async def revoke_minecraft_permissions(cls, nick: str) -> bool:
-        """Сбрасывает группу прав игрока на default в LuckPerms при снятии с должности."""
-        if not PTERO_API_KEY:
-            log.warning("PTERO_API_KEY not configured, skipping Minecraft permissions revocation")
-            return False
-
-        clean_nick = re.sub(r"[^\w]", "", nick)
+        """Сбрасывает группу LuckPerms игрока на default через консоль."""
+        from src.core.config import PTERO_SERVER_IDS
+        clean_nick = re.sub(r"[^A-Za-z0-9_]", "", str(nick or ""))
         if not clean_nick:
             return False
-
+        # Не используем `lp user clear`: он удаляет все персональные permission nodes.
+        # Сбрасываем только родительскую группу, сохраняя индивидуальные права игрока.
         commands = [
             f"lp user {clean_nick} parent set default",
-            f"lp user {clean_nick} clear",
             "lp sync",
         ]
-
         success = False
-        headers = {
-            "Authorization": f"Bearer {PTERO_API_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-
-        async with aiohttp.ClientSession() as session:
-            for srv_id in PTERO_SERVER_IDS:
-                try:
-                    srv_success = True
-                    for cmd in commands:
-                        url = f"{PTERO_BASE_URL}/api/client/servers/{srv_id}/command"
-                        async with session.post(url, json={"command": cmd}, headers=headers, timeout=5) as resp:
-                            if resp.status not in (204, 200):
-                                srv_success = False
-                    if srv_success:
-                        success = True
-                        log.info(f"Revoked Minecraft permissions for {clean_nick} on server {srv_id}")
-                except Exception as e:
-                    log.debug(f"Ptero command failed on server {srv_id}: {e}")
-
+        for server_id in PTERO_SERVER_IDS:
+            if await MinecraftPermissionsManager._send_console_commands(server_id, commands):
+                success = True
+                log.info("LuckPerms revoke commands sent for %s on server %s", clean_nick, server_id)
         return success
+
+    @staticmethod
+    async def send_private_minecraft_warning(nick: str, reason: str, total_warns: int, source: str = "Персонал") -> bool:
+        """Отправляет tellraw только конкретному игроку; общий чат не затрагивается."""
+        import json
+        from src.core.config import PTERO_SERVER_IDS
+        clean_nick = re.sub(r"[^A-Za-z0-9_]", "", str(nick or ""))
+        if not clean_nick:
+            log.warning("Minecraft private warning skipped: invalid nickname")
+            return False
+        safe_reason = str(reason or "Без указания причины")[:300]
+        safe_source = str(source or "Персонал")[:60]
+        message = (
+            f"[WeriGrief] Вам выдано предупреждение: {safe_reason}. "
+            f"Всего предупреждений: {int(total_warns)}. Раздел: {safe_source}."
+        )
+        tellraw = "tellraw " + clean_nick + " " + json.dumps(
+            {"text": message, "color": "red"}, ensure_ascii=False, separators=(",", ":")
+        )
+        delivered = False
+        for server_id in PTERO_SERVER_IDS:
+            if await MinecraftPermissionsManager._send_console_commands(server_id, [tellraw]):
+                delivered = True
+        return delivered
 

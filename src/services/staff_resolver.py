@@ -23,6 +23,8 @@ class StaffResolver:
         if self.sheets_monitor:
             try:
                 staff = self.sheets_monitor.get_staff_list()
+                # Replace cache, do not accumulate removed/renamed staff from old snapshots.
+                self.sheets_discord_map = {}
                 for s in staff:
                     nick = s.get("nick", "").strip().lower()
                     disc = s.get("discord", "").strip().lower().replace("\n", "")

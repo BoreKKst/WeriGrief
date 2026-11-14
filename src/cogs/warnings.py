@@ -3,11 +3,13 @@ Cog for managing warnings (/warn, /unwarn, /warns, /clearwarns).
 """
 
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import commands
 from src.core.config import log, GUILD_ID, WARN_NOTIFY_CHANNEL, ADMIN_KEYWORDS, LEADERSHIP_ROLES, LEADERSHIP_IDS, STAFF_REGISTRY
 from src.utils.embeds import EmbedBuilder
+from src.services.permissions import MinecraftPermissionsManager
 from src.services.sheets_api import normalize_date_str
 
 
@@ -72,14 +74,22 @@ class WarningsCog(commands.Cog, name="Warnings"):
             else:
                 issuer_name = ctx.author.display_name or ctx.author.name
 
-        date_str = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y")
+        date_str = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y")
         total_warns = self.sheets_monitor.add_warning(mc_nick, date_str, reason, issuer_name)
+        if total_warns <= 0:
+            await ctx.send("❌ Не удалось записать предупреждение в Google Sheets. Уведомления и роли не изменялись.")
+            return
 
         warn_channel = guild.get_channel(WARN_NOTIFY_CHANNEL)
         ping_text = f"{member.mention} " if member else ""
         embed = EmbedBuilder.build_warn_embed(mc_nick, date_str, reason, issuer_name, total_warns)
         if warn_channel:
             await warn_channel.send(content=ping_text, embed=embed)
+
+        # Личное уведомление конкретному игроку в Minecraft (tellraw), не в общий чат.
+        mc_notified = await MinecraftPermissionsManager.send_private_minecraft_warning(
+            mc_nick, reason, total_warns, source="Нарушения"
+        )
 
         role_assigned = False
         if total_warns >= 3 and member:
@@ -103,6 +113,7 @@ class WarningsCog(commands.Cog, name="Warnings"):
         resp_desc = f"Предупреждение сотруднику `{mc_nick}` успешно занесено в таблицу!\n**Всего предупреждений:** {total_warns}"
         if role_assigned:
             resp_desc += "\n🚨 Назначена роль `⚠️ На испытании`."
+        resp_desc += "\n🎮 Команда личного уведомления отправлена в Minecraft (игрок должен быть онлайн)." if mc_notified else "\n⚠️ Не удалось отправить команду уведомления в Minecraft — проверьте Pterodactyl API и доступность сервера."
 
         await ctx.send(f"✅ {resp_desc}")
 

@@ -5,6 +5,8 @@ Periodic synchronization loop with Google Sheets:
 - Monthly reset of warnings on the 1st of each month
 - Automated daily playtime norm check at 00:00 MSK
 """
+from zoneinfo import ZoneInfo
+
 
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -29,17 +31,63 @@ class SheetsSyncTask:
         self._loop = tasks.loop(seconds=POLL_INTERVAL)(self.poll_sheets)
         self._loop.before_loop(self.before_poll)
         self._loop.error(self.poll_sheets_error)
+        self._midnight_task = None
 
     def start(self):
-        """Запускает цикл опроса."""
+        """Запускает опрос Sheets и отдельный точный планировщик полуночи MSK."""
         if not self._loop.is_running():
             self._loop.start()
             log.info(f"Sheets poll loop started (interval: {POLL_INTERVAL}s)")
+        if self._midnight_task is None or self._midnight_task.done():
+            self._midnight_task = asyncio.create_task(self._run_midnight_schedule())
 
     def stop(self):
-        """Останавливает цикл опроса."""
+        """Останавливает фоновые задачи."""
         if self._loop.is_running():
             self._loop.stop()
+        if self._midnight_task and not self._midnight_task.done():
+            self._midnight_task.cancel()
+
+    async def _run_midnight_schedule(self):
+        await self.bot.wait_until_ready()
+        tz = ZoneInfo("Europe/Moscow")
+        while True:
+            now = datetime.now(tz)
+            target = (now.replace(hour=0, minute=0, second=0, microsecond=0)
+                      + timedelta(days=1))
+            # If the bot starts during the midnight minute and today's check is pending,
+            # run immediately instead of waiting a full day.
+            today_key = now.strftime("%Y-%m-%d")
+            if now.hour == 0 and now.minute < 5 and self.sheets_monitor and (
+                getattr(self.sheets_monitor, "last_playtime_date", "") != today_key
+            ):
+                target = now
+            await asyncio.sleep(max(0.0, (target - datetime.now(tz)).total_seconds()))
+            run_date = datetime.now(tz).strftime("%Y-%m-%d")
+            if not self.sheets_monitor or getattr(self.sheets_monitor, "last_playtime_date", "") == run_date:
+                continue
+            guild = self.bot.get_guild(GUILD_ID)
+            if not guild:
+                log.error("Midnight norm check skipped: configured Discord guild is unavailable")
+                continue
+            # Retry temporary Pterodactyl / Sheets failures without marking the day complete.
+            for attempt in range(10):
+                try:
+                    result = await self.playtime_tracker.process_daily_playtime_and_norms(
+                        guild, dry_run=False, is_midnight=True
+                    )
+                    if result and not result.get("error"):
+                        self.sheets_monitor.last_playtime_date = run_date
+                        self.sheets_monitor._save_state()
+                        log.info("Daily norm check completed for %s at Europe/Moscow midnight", run_date)
+                        break
+                    log.warning("Midnight norm check attempt %s failed: %s", attempt + 1,
+                                (result or {}).get("error", "empty result"))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Midnight norm check attempt %s failed", attempt + 1)
+                await asyncio.sleep(30)
 
     async def before_poll(self):
         await self.bot.wait_until_ready()
@@ -66,21 +114,36 @@ class SheetsSyncTask:
         warn_channel = guild.get_channel(WARN_NOTIFY_CHANNEL)
         staff_channel = guild.get_channel(STAFF_NOTIFY_CHANNEL)
 
-        now = datetime.now(timezone.utc)
-        current_month = now.strftime("%Y-%m")
+        # Normalize Discord column to actual usernames (member.name), not numeric IDs.
+        try:
+            for staff_entry in self.sheets_monitor.get_staff_list():
+                nick = (staff_entry.get("nick") or "").strip()
+                discord_value = (staff_entry.get("discord") or "").strip().lstrip("@")
+                if not nick:
+                    continue
+                member = None
+                if discord_value.isdigit():
+                    member = guild.get_member(int(discord_value))
+                    if member is None:
+                        try:
+                            member = await guild.fetch_member(int(discord_value))
+                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                            member = None
+                if member is None:
+                    member = self.staff_resolver.find_member_by_mc_nick(guild, nick)
+                if member and discord_value != member.name:
+                    self.sheets_monitor.update_staff_discord_username(nick, member.name)
+        except Exception as e:
+            log.warning(f"Could not normalize Discord usernames in staff sheet: {e}")
 
-        # 0. Суточная проверка онлайна и нормы в 00:00 MSK (UTC+3)
-        msk_now = now + timedelta(hours=3)
-        today_msk = msk_now.strftime("%Y-%m-%d")
-        if msk_now.hour == 0 and msk_now.minute < 5:
-            if getattr(self.sheets_monitor, "last_playtime_date", "") != today_msk:
-                log.info(f"⏰ Midnight MSK reached ({today_msk} 00:00 MSK)! Executing daily playtime & norm check...")
-                self.sheets_monitor.last_playtime_date = today_msk
-                self.sheets_monitor._save_state()
-                try:
-                    await self.playtime_tracker.process_daily_playtime_and_norms(guild, dry_run=False, is_midnight=True)
-                except Exception as e:
-                    log.error(f"Error in automated daily playtime check: {e}", exc_info=True)
+        # Refresh the in-memory lookup too, so midnight DM delivery uses the new usernames.
+        try:
+            self.staff_resolver.populate_sheets_discord_map()
+        except Exception as e:
+            log.warning(f"Could not refresh Discord username cache: {e}")
+
+        now = datetime.now(ZoneInfo("Europe/Moscow"))
+        current_month = now.strftime("%Y-%m")
 
         # 1. Ежемесячный сброс предупреждений 1-го числа
         if self.sheets_monitor.last_reset_month and self.sheets_monitor.last_reset_month != current_month:

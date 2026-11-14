@@ -1,12 +1,14 @@
 """
 Cog for playtime and norm monitoring commands (/norm, /check_norm, /norm_exempt, /help_staff).
 """
+from zoneinfo import ZoneInfo
+
 
 from datetime import datetime, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands
-from src.core.config import GUILD_ID, DAILY_NORM_HOURS, LEADERSHIP_IDS
+from src.core.config import GUILD_ID, DAILY_NORM_HOURS, LEADERSHIP_IDS, STAFF_NOTIFY_CHANNEL
 
 
 class NormCog(commands.Cog, name="Norm"):
@@ -21,12 +23,9 @@ class NormCog(commands.Cog, name="Norm"):
     @commands.hybrid_command(
         name="check_norm",
         aliases=["checknorm", "syncplaytime"],
-        description="Проверить суточную норму онлайна (1ч) и обновить часы в таблице (для Администрации)",
+        description="Посмотреть предварительный результат нормы без выдачи предупреждений",
     )
-    @app_commands.describe(
-        dry_run="Только просмотр без выдачи предупреждений (по умолчанию True при ручном вызове)"
-    )
-    async def cmd_check_norm(self, ctx: commands.Context, dry_run: bool = True):
+    async def cmd_check_norm(self, ctx: commands.Context):
         """Ручной запуск проверки суточной нормы онлайна."""
         await ctx.defer()
         guild = ctx.guild or self.bot.get_guild(GUILD_ID)
@@ -34,13 +33,32 @@ class NormCog(commands.Cog, name="Norm"):
             await ctx.send("❌ Команда доступна только **Администраторам**, **Старшим администраторам** и руководству проекта.", ephemeral=True)
             return
 
-        if not dry_run:
-            await ctx.send("ℹ️ Примечание: начисление варнов и фиксация новых суточных счетчиков онлайна производится автоматически исключительно в 00:00 MSK. Проверка выполнена в режиме предпросмотра.")
-            dry_run = True
+        # Полная ручная проверка ВСЕГО состава. dry_run=True гарантирует, что
+        # команда не выдаёт варны, не начисляет часы и не меняет baseline/дату
+        # автоматической проверки. Подробный отчёт публикуется в канале Персонал.
+        res = await self.playtime_tracker.process_daily_playtime_and_norms(
+            guild, dry_run=True, is_midnight=False, send_summary=True
+        )
+        mode_str = "полная проверка состава (без варнов и изменений данных)"
+        if res.get("error"):
+            await ctx.send(f"❌ {res['error']}")
+            return
+        if not res.get("summary_sent"):
+            detail = res.get("summary_error") or "Канал Персонал не настроен или недоступен."
+            await ctx.send(
+                f"⚠️ Проверка завершена, но отчёт НЕ отправлен в канал Персонал.\n{detail}\n"
+                f"Результат: всего **{res.get('total', 0)}**, выполнили **{res.get('met', 0)}**, "
+                f"не выполнили **{res.get('failed', 0)}**, освобождены **{res.get('exempt', 0)}**, "
+                f"нет данных **{res.get('unavailable', 0)}**."
+            )
+            return
 
-        res = await self.playtime_tracker.process_daily_playtime_and_norms(guild, dry_run=dry_run, is_midnight=False)
-        mode_str = "Тестовый режим (без варнов)"
-        await ctx.send(f"✅ Проверка онлайна завершена [{mode_str}]! Выполнили норму: **{res.get('met', 0)}**, Не выполнили: **{res.get('failed', 0)}**, Руководство: **{res.get('exempt', 0)}**.")
+        await ctx.send(
+            f"✅ Полная проверка **{res.get('total', 0)} сотрудников** опубликована в <#{STAFF_NOTIFY_CHANNEL}>.\n"
+            f"🟢 Выполнили: **{res.get('met', 0)}** • 🔴 Не выполнили: **{res.get('failed', 0)}** • "
+            f"👑 Освобождены: **{res.get('exempt', 0)}** • ⚪ Нет данных: **{res.get('unavailable', 0)}**.\n"
+            f"Режим: **без предупреждений и изменений таблицы**."
+        )
 
     @commands.hybrid_command(
         name="norm",
@@ -99,7 +117,7 @@ class NormCog(commands.Cog, name="Norm"):
 
                     snapshot = self.sheets_monitor.mc_playtime_snapshots.get(nick.lower()) if self.sheets_monitor else None
                     if not snapshot and curr_h > 0.0 and self.sheets_monitor:
-                        today_k = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%d")
+                        today_k = (datetime.now(ZoneInfo("Europe/Moscow"))).strftime("%Y-%m-%d")
                         snapshot = {
                             "hours": curr_h,
                             "date": today_k,

@@ -1,6 +1,8 @@
 """
 Playtime calculation, Minecraft stats fetching via Pterodactyl API, and daily norm tracking.
 """
+from zoneinfo import ZoneInfo
+
 
 import asyncio
 import hashlib
@@ -11,9 +13,10 @@ import aiohttp
 import discord
 from src.core.config import (
     log, PTERO_API_KEY, PTERO_BASE_URL, GAME_SERVERS, DAILY_NORM_HOURS,
-    WARN_NOTIFY_CHANNEL, STAFF_NOTIFY_CHANNEL
+    WARN_NOTIFY_CHANNEL, STAFF_NOTIFY_CHANNEL, MC_STATS_DIRECTORY
 )
 from src.utils.embeds import EmbedBuilder
+from src.services.permissions import MinecraftPermissionsManager
 
 
 class PlaytimeTracker:
@@ -119,7 +122,9 @@ class PlaytimeTracker:
                     log.debug(f"save-all batch error: {e}")
 
             async def _get_server_ticks(srv: str, u: str) -> int:
-                url = f"{PTERO_BASE_URL}/api/client/servers/{srv}/files/contents?file=world%2Fstats%2F{u}.json"
+                from urllib.parse import quote
+                stats_file = f"{MC_STATS_DIRECTORY}/{u}.json"
+                url = f"{PTERO_BASE_URL}/api/client/servers/{srv}/files/contents?file={quote(stats_file, safe='')}"
                 async with sem:
                     for attempt in range(2):
                         try:
@@ -128,21 +133,35 @@ class PlaytimeTracker:
                                     data = await resp.json(content_type=None)
                                     c = data.get("stats", {}).get("minecraft:custom", {})
                                     return c.get("minecraft:play_time") or c.get("minecraft:play_one_minute") or 0
-                                elif resp.status in (404, 500):
-                                    return 0
+                                elif resp.status == 404:
+                                    log.debug(
+                                        "Stats file not found for UUID %s on server %s at %s; check MC_STATS_DIRECTORY and UUID mode",
+                                        u, srv, stats_file
+                                    )
+                                    return None
+                                else:
+                                    log.warning(
+                                        "Pterodactyl stats request failed: server=%s status=%s nick_uuid=%s",
+                                        srv, resp.status, u
+                                    )
+                                    return None
                         except Exception as e:
                             if attempt == 0:
                                 await asyncio.sleep(0.15)
                             else:
                                 log.debug(f"Error reading stats for {u} on {srv}: {e}")
-                return 0
+                return None
 
             clean_nicks = [n.strip() for n in nicks if n.strip()]
             for clean in clean_nicks:
                 u = self.mc_offline_uuid(clean)
                 tasks = [_get_server_ticks(srv, u) for srv in GAME_SERVERS]
                 tick_results = await asyncio.gather(*tasks, return_exceptions=True)
-                total_ticks = sum(t for t in tick_results if isinstance(t, int))
+                valid_ticks = [t for t in tick_results if isinstance(t, (int, float))]
+                if not valid_ticks:
+                    log.error("No readable stats files for Minecraft player %s on configured servers", clean)
+                    continue
+                total_ticks = int(sum(valid_ticks))
                 h_float, h_str = self.format_ticks_to_hours(total_ticks)
                 results[clean.lower()] = {
                     "nick": clean,
@@ -190,7 +209,7 @@ class PlaytimeTracker:
 
         snapshot = self.sheets_monitor.mc_playtime_snapshots.get(actual_nick.lower()) if self.sheets_monitor else None
         if not snapshot and current_mc_hours > 0.0 and self.sheets_monitor:
-            today_k = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%d")
+            today_k = (datetime.now(ZoneInfo("Europe/Moscow"))).strftime("%Y-%m-%d")
             recovered_base = 0.0
             try:
                 sh_val = float(str(sheet_hours).replace(",", "."))
@@ -250,7 +269,7 @@ class PlaytimeTracker:
         if not member:
             return False
 
-        date_str = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y")
+        date_str = (datetime.now(ZoneInfo("Europe/Moscow"))).strftime("%d.%m.%Y")
 
         if is_exempt:
             embed = discord.Embed(
@@ -314,13 +333,13 @@ class PlaytimeTracker:
             return False
 
     async def process_daily_playtime_and_norms(
-        self, guild: discord.Guild, dry_run: bool = False, is_midnight: bool = False
+        self, guild: discord.Guild, dry_run: bool = False, is_midnight: bool = False, send_summary: bool = True
     ) -> dict:
         """
         Ежедневная проверка онлайна и нормы в 00:00 МСК:
         1. Снимает статистику /playtime со всех игровых серверов с предварительным flush save-all.
         2. Сравнивает со слепком предыдущего дня.
-        3. Начисляет отыгранные часы в Google Таблицу ('Списки', колонка G).
+        3. Начисляет отыгранные часы в Google Таблицу ('Списки', колонка E; схема A:F).
         4. Сотрудникам без освобождения, наигравшим < 1ч, выдает варн в таблице.
         5. Рассылает личные сообщения и итоговый отчёт в канал персонала.
         """
@@ -336,19 +355,32 @@ class PlaytimeTracker:
         nicks = [s["nick"] for s in staff_list]
         log.info(f"Running daily playtime check for {len(nicks)} staff members (dry_run={dry_run}, is_midnight={is_midnight})...")
 
-        playtime_data = await self.fetch_playtime_for_staff(nicks, flush_save=True)
+        playtime_data = await self.fetch_playtime_for_staff(
+            nicks, flush_save=(not dry_run and is_midnight)
+        )
+        if not playtime_data:
+            log.error("Daily norm check aborted: no readable Minecraft stats were returned.")
+            return {"error": "Не удалось получить статистику Minecraft из Pterodactyl. Проверь PTERO_API_KEY, ID сервера, MC_STATS_DIRECTORY и UUID игроков. Варны и часы не изменены."}
 
-        msk_time = datetime.now(timezone.utc) + timedelta(hours=3)
+        msk_time = datetime.now(ZoneInfo("Europe/Moscow"))
         date_str = msk_time.strftime("%d.%m.%Y")
         today_key = msk_time.strftime("%Y-%m-%d")
 
-        warn_channel = guild.get_channel(WARN_NOTIFY_CHANNEL) if guild else None
-        staff_channel = guild.get_channel(STAFF_NOTIFY_CHANNEL) if guild else None
+        warn_channel = guild.get_channel(WARN_NOTIFY_CHANNEL) if guild and WARN_NOTIFY_CHANNEL else None
+        staff_channel = guild.get_channel(STAFF_NOTIFY_CHANNEL) if guild and STAFF_NOTIFY_CHANNEL else None
+        # get_channel() зависит от локального Discord-кэша. Для отчёта обязательно
+        # пробуем REST-fetch, иначе команда могла сообщить об успехе без отправки.
+        if send_summary and guild and staff_channel is None and STAFF_NOTIFY_CHANNEL:
+            try:
+                staff_channel = await guild.fetch_channel(STAFF_NOTIFY_CHANNEL)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                log.error("Cannot fetch staff report channel %s: %s", STAFF_NOTIFY_CHANNEL, exc)
 
         met_list = []
         failed_list = []
         exempt_list = []
         baseline_first_day_list = []
+        unavailable_list = []
         hours_delta_map = {}
 
         for s in staff_list:
@@ -356,7 +388,15 @@ class PlaytimeTracker:
             pos = s.get("position", "Сотрудник")
             exempt = self.is_norm_exempt(pos, nick)
 
-            p_info = playtime_data.get(nick.lower(), {})
+            # Отпуск освобождает сотрудника от нормы на даты отпуска.
+            if self.sheets_monitor.is_on_vacation(nick):
+                exempt_list.append((nick, f"{pos} • отпуск", "Отпуск", 0.0))
+                continue
+
+            p_info = playtime_data.get(nick.lower())
+            if p_info is None:
+                unavailable_list.append(nick)
+                continue
             current_mc_hours = p_info.get("hours", 0.0)
 
             snapshot = self.sheets_monitor.mc_playtime_snapshots.get(nick.lower()) if self.sheets_monitor else None
@@ -368,7 +408,7 @@ class PlaytimeTracker:
 
             if exempt:
                 exempt_list.append((nick, pos, delta_str, delta_hours))
-                if member:
+                if member and not dry_run and is_midnight:
                     await self.send_norm_dm(member, nick, pos, delta_str, delta_hours, norm_met=True, is_exempt=True)
                 continue
 
@@ -376,18 +416,18 @@ class PlaytimeTracker:
             if is_baseline_day:
                 if delta_hours >= DAILY_NORM_HOURS:
                     met_list.append((nick, pos, delta_str, delta_hours))
-                    if member:
+                    if member and not dry_run and is_midnight:
                         await self.send_norm_dm(member, nick, pos, delta_str, delta_hours, norm_met=True, is_exempt=False)
                 else:
                     baseline_first_day_list.append((nick, pos, delta_str, delta_hours))
-                    if member:
+                    if member and not dry_run and is_midnight:
                         await self.send_norm_dm(member, nick, pos, delta_str, delta_hours, norm_met=True, is_exempt=True)
                 continue
 
             norm_met = delta_hours >= DAILY_NORM_HOURS
             if norm_met:
                 met_list.append((nick, pos, delta_str, delta_hours))
-                if member:
+                if member and not dry_run and is_midnight:
                     await self.send_norm_dm(member, nick, pos, delta_str, delta_hours, norm_met=True, is_exempt=False)
             else:
                 total_warns = 0
@@ -395,7 +435,7 @@ class PlaytimeTracker:
                 if not dry_run and is_midnight:
                     reason = f"Невыполнение суточной нормы онлайна (наиграно: {delta_str} из 1ч)"
                     total_warns = self.sheets_monitor.add_warning(nick, date_str, reason, "Система контроля нормы")
-                    warn_issued = True
+                    warn_issued = total_warns > 0
 
                     if total_warns >= 3 and member:
                         warn_role = discord.utils.get(guild.roles, name="⚠️ На испытании")
@@ -405,13 +445,17 @@ class PlaytimeTracker:
                             except Exception as e:
                                 log.error(f"Failed to add probation role to {member}: {e}")
 
-                    if warn_channel:
+                    if warn_channel and warn_issued:
                         ping = f"{member.mention} " if member else ""
                         embed = EmbedBuilder.build_warn_embed(nick, date_str, reason, "Система контроля нормы", total_warns)
                         await warn_channel.send(content=ping, embed=embed)
+                    if warn_issued:
+                        await MinecraftPermissionsManager.send_private_minecraft_warning(
+                            nick, reason, total_warns, source="Персонал / контроль нормы"
+                        )
 
                 failed_list.append((nick, pos, delta_str, delta_hours, total_warns))
-                if member:
+                if member and not dry_run and is_midnight:
                     await self.send_norm_dm(
                         member, nick, pos, delta_str, delta_hours,
                         norm_met=False, is_exempt=False,
@@ -421,7 +465,9 @@ class PlaytimeTracker:
         if not dry_run and is_midnight:
             self.sheets_monitor.increment_staff_hours(hours_delta_map)
             for nick in nicks:
-                p_info = playtime_data.get(nick.lower(), {})
+                p_info = playtime_data.get(nick.lower())
+                if p_info is None:
+                    continue
                 curr_h = p_info.get("hours", 0.0)
                 self.sheets_monitor.mc_playtime_snapshots[nick.lower()] = {
                     "hours": curr_h,
@@ -430,44 +476,79 @@ class PlaytimeTracker:
                 }
             self.sheets_monitor._save_state()
 
+        preview_label = " (ПРЕДВАРИТЕЛЬНО • без предупреждений и изменений)" if dry_run else ""
         summary_embed = discord.Embed(
-            title=f"📊 Ежедневный отчет по суточной норме онлайна ({date_str})",
-            color=0x2ECC71 if not failed_list else 0xE67E22,
+            title=f"📊 Проверка суточной нормы WeriGrief — {date_str}{preview_label}",
+            color=0x5865F2 if dry_run else (0x2ECC71 if not failed_list else 0xE67E22),
             description=(
-                f"**Регламент нормы:** 1 час в сутки (чистая разница онлайна за день).\n"
-                f"Руководство и освобожденные администраторы не учитываются в норме.\n\n"
-                f"🟢 **Выполнили норму (1ч+):** {len(met_list)}\n"
-                f"🔴 **Не выполнили (выдан варн):** {len(failed_list)}\n"
-                f"👑 **Без нормы (освобождены):** {len(exempt_list) + len(baseline_first_day_list)}"
+                f"**Норма:** {DAILY_NORM_HOURS:g} ч. чистого онлайна за сутки.\n"
+                f"**Всего в составе:** {len(staff_list)}\n\n"
+                f"🟢 Выполнили: **{len(met_list)}**\n"
+                f"🔴 Не выполнили: **{len(failed_list)}**\n"
+                f"👑 Освобождены / отпуск: **{len(exempt_list)}**\n"
+                f"🆕 Первый день / нет baseline: **{len(baseline_first_day_list)}**\n"
+                f"⚪ Нет данных Pterodactyl: **{len(unavailable_list)}**"
             ),
             timestamp=datetime.now(timezone.utc),
         )
 
-        if met_list:
-            val = "\n".join([f"• `{n}` ({p}): **{h}**" for n, p, h, _ in met_list])
-            summary_embed.add_field(name="🟢 Норма выполнена (1ч+)", value=val[:1024], inline=False)
+        # Все категории выводятся полностью. Делим длинные списки на поля,
+        # чтобы не обрезать состав ограничением Discord в 1024 символа на поле.
+        sections = [
+            ("🟢 Выполнили норму", [f"• `{n}` — {p}: **{h}**" for n, p, h, _ in met_list]),
+            ("🔴 Не выполнили норму" + (" • без варна" if dry_run else ""), [f"• `{n}` — {p}: **{h}**" + (f" • варнов: {w}" if w else "") for n, p, h, _, w in failed_list]),
+            ("👑 Освобождены / отпуск", [f"• `{n}` — {p}: **{h}**" for n, p, h, _ in exempt_list]),
+            ("🆕 Первый день / baseline", [f"• `{n}` — {p}: **{h}**" for n, p, h, _ in baseline_first_day_list]),
+            ("⚪ Нет данных Pterodactyl", [f"• `{n}` — статистика недоступна" for n in unavailable_list]),
+        ]
+        embeds = [summary_embed]
+        for section_name, lines in sections:
+            if not lines:
+                continue
+            chunks, current = [], []
+            current_len = 0
+            for line in lines:
+                if current and current_len + len(line) + 1 > 1000:
+                    chunks.append("\n".join(current))
+                    current, current_len = [], 0
+                current.append(line)
+                current_len += len(line) + 1
+            if current:
+                chunks.append("\n".join(current))
+            for idx, chunk in enumerate(chunks, start=1):
+                suffix = f" ({idx}/{len(chunks)})" if len(chunks) > 1 else ""
+                if len(summary_embed.fields) >= 25:
+                    extra = discord.Embed(title=f"📊 Продолжение отчёта — {date_str}", color=summary_embed.color)
+                    embeds.append(extra)
+                embeds[-1].add_field(name=section_name + suffix, value=chunk, inline=False)
 
-        if failed_list:
-            val = "\n".join([f"• `{n}` ({p}): **{h}** ❌ *(Варнов: {w})*" for n, p, h, _, w in failed_list])
-            summary_embed.add_field(name="🔴 Норма не выполнена (< 1ч)", value=val[:1024], inline=False)
+        for e in embeds:
+            e.set_footer(text="WeriGrief Staff System • Автоматическая проверка ежедневно в 00:00 Europe/Moscow")
 
-        if baseline_first_day_list:
-            val = "\n".join([f"• `{n}` ({p}): **{h}** *(Первый день, учёт со следующих суток)*" for n, p, h, _ in baseline_first_day_list])
-            summary_embed.add_field(name="🆕 Первый день работы (без варна)", value=val[:1024], inline=False)
-
-        if exempt_list:
-            val = "\n".join([f"• `{n}` ({p}): **{h}**" for n, p, h, _ in exempt_list])
-            summary_embed.add_field(name="👑 Освобождены от нормы", value=val[:1024], inline=False)
-
-        summary_embed.set_footer(text="WeriGrief Staff System • Авто-проверка в 00:00 MSK")
-
-        if staff_channel:
-            await staff_channel.send(embed=summary_embed)
+        summary_sent = False
+        summary_error = None
+        if send_summary:
+            if staff_channel is None:
+                summary_error = f"Не найден канал Персонал (ID {STAFF_NOTIFY_CHANNEL}). Проверьте ID и права бота View Channel / Send Messages / Embed Links."
+                log.error(summary_error)
+            else:
+                try:
+                    for e in embeds:
+                        await staff_channel.send(embed=e)
+                    summary_sent = True
+                    log.info("Full norm report sent to staff channel %s (%s embeds, %s staff)", STAFF_NOTIFY_CHANNEL, len(embeds), len(staff_list))
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+                    summary_error = f"Discord не принял отчёт в канал Персонал: {type(exc).__name__}: {exc}"
+                    log.exception(summary_error)
 
         return {
             "met": len(met_list),
             "failed": len(failed_list),
             "exempt": len(exempt_list),
             "baseline": len(baseline_first_day_list),
+            "unavailable": len(unavailable_list),
+            "total": len(staff_list),
+            "summary_sent": summary_sent,
+            "summary_error": summary_error,
         }
 

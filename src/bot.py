@@ -4,6 +4,7 @@ Initializes bot, registers services, cogs, UI components and event listeners.
 """
 
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands
 
@@ -39,6 +40,7 @@ staff_resolver: StaffResolver | None = None
 playtime_tracker: PlaytimeTracker | None = None
 sheets_sync_task: SheetsSyncTask | None = None
 automod_service: AutomodService | None = None
+_initialized = False
 
 
 @bot.event
@@ -126,7 +128,9 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
 @bot.event
 async def on_ready():
     """Событие готовности бота: регистрация постоянных Views, слэш-команд и запуск циклов."""
-    global sheets_monitor, staff_resolver, playtime_tracker, sheets_sync_task, automod_service
+    global sheets_monitor, staff_resolver, playtime_tracker, sheets_sync_task, automod_service, _initialized
+    if _initialized:
+        return
 
     # Регистрация UI Views для постоянной обработки кнопок после перезапуска
     bot.add_view(RulesView())
@@ -139,12 +143,6 @@ async def on_ready():
         if staff_resolver:
             await staff_resolver.resolve_discord_ids(guild)
 
-        try:
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            log.info(f"✅ Synced {len(synced)} slash commands to guild '{guild.name}'")
-        except Exception as e:
-            log.error(f"Failed to sync slash commands: {e}")
     else:
         log.warning(f"Guild {GUILD_ID} not found!")
 
@@ -167,16 +165,21 @@ async def on_ready():
                 if active_staff:
                     nicks = [s["nick"] for s in active_staff]
                     pt_data = await playtime_tracker.fetch_playtime_for_staff(nicks)
-                    today_k = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%d")
+                    today_k = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d")
                     for n in nicks:
-                        info = pt_data.get(n.lower(), {})
+                        info = pt_data.get(n.lower())
+                        if info is None:
+                            continue
                         sheets_monitor.mc_playtime_snapshots[n.lower()] = {
                             "hours": info.get("hours", 0.0),
                             "date": today_k,
                             "timestamp": datetime.now(timezone.utc).timestamp(),
                         }
-                    sheets_monitor._save_state()
-                    log.info(f"Initialized MC playtime baseline snapshots for {len(nicks)} staff members")
+                    if sheets_monitor.mc_playtime_snapshots:
+                        sheets_monitor._save_state()
+                        log.info(f"Initialized MC playtime baseline snapshots for {len(sheets_monitor.mc_playtime_snapshots)} staff members")
+                    else:
+                        log.warning("No Minecraft stats were readable; baseline was not initialized. Check Pterodactyl API key, server ID, MC_STATS_DIRECTORY and UUID mode.")
             except Exception as e:
                 log.warning(f"Could not take initial playtime snapshot: {e}")
 
@@ -185,9 +188,22 @@ async def on_ready():
         await bot.add_cog(StaffCog(bot, sheets_monitor, staff_resolver))
         await bot.add_cog(NormCog(bot, sheets_monitor, staff_resolver, playtime_tracker))
 
+        # Синхронизация slash-команд после загрузки Cogs
+        if guild:
+            try:
+                bot.tree.copy_global_to(guild=guild)
+                synced = await bot.tree.sync(guild=guild)
+                synced_names = sorted(command.name for command in synced)
+                log.info(f"✅ Synced {len(synced)} slash commands to guild '{guild.name}': {', '.join(synced_names)}")
+                if "unstaff" not in synced_names:
+                    log.error("/unstaff was not returned by Discord after command sync")
+            except Exception as e:
+                log.error(f"Failed to sync slash commands: {e}")
+
         # Запуск фонового опроса таблиц
         sheets_sync_task = SheetsSyncTask(bot, sheets_monitor, staff_resolver, playtime_tracker)
         sheets_sync_task.start()
+        _initialized = True
 
     except Exception as e:
         log.error(f"Failed to init Sheets monitor or services: {e}", exc_info=True)

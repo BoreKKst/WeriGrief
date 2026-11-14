@@ -140,7 +140,12 @@ class EmbedBuilder:
             )
 
         if mc_group:
-            mc_status = f"✅ Выдана группа `{mc_group}` (LuckPerms)" if mc_granted else f"⚡ Команда `lp parent set {mc_group}` отправлена"
+            mc_status = (
+                f"✅ Pterodactyl API принял команду `lp user <nick> parent set {mc_group}`. "
+                "Применение группы на Minecraft-сервере отдельно не подтверждено."
+                if mc_granted else
+                f"⚠️ Не удалось подтвердить отправку команды для группы `{mc_group}` через Pterodactyl API."
+            )
             embed.add_field(name="🎮 Права в Minecraft", value=mc_status, inline=False)
 
         if comment:
