@@ -56,3 +56,18 @@ sheets_state.json
 *.bak
 *.before_*
 WeriGrief-StaffBot/
+
+# WeriGrief local backups
+*.backup
+*.backup_*
+*.bak
+*.old
+backups/
+backup_query/
+postgres_audit.txt
+replace_playtime.py
+WeriGrief_Final.zip
+WeriGrief_PostgreSQL.sql
+*.backup*
+
+*.backup*

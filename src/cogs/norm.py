@@ -48,15 +48,16 @@ class NormCog(commands.Cog, name="Norm"):
             await ctx.send(
                 f"⚠️ Проверка завершена, но отчёт НЕ отправлен в канал Персонал.\n{detail}\n"
                 f"Результат: всего **{res.get('total', 0)}**, выполнили **{res.get('met', 0)}**, "
-                f"не выполнили **{res.get('failed', 0)}**, освобождены **{res.get('exempt', 0)}**, "
-                f"нет данных **{res.get('unavailable', 0)}**."
+                f"не выполнили **{res.get('failed', 0)}**, освобождены **{res.get('exempt', 0)}**.\n"
+                f"Измерение: **{'надёжное' if res.get('reliable') else 'неполное'}**."
             )
             return
 
         await ctx.send(
             f"✅ Полная проверка **{res.get('total', 0)} сотрудников** опубликована в <#{STAFF_NOTIFY_CHANNEL}>.\n"
             f"🟢 Выполнили: **{res.get('met', 0)}** • 🔴 Не выполнили: **{res.get('failed', 0)}** • "
-            f"👑 Освобождены: **{res.get('exempt', 0)}** • ⚪ Нет данных: **{res.get('unavailable', 0)}**.\n"
+            f"👑 Освобождены: **{res.get('exempt', 0)}**.\n"
+            f"📡 Измерение: **{'надёжное' if res.get('reliable') else 'неполное'}**.\n"
             f"Режим: **без предупреждений и изменений таблицы**."
         )
 
@@ -65,9 +66,9 @@ class NormCog(commands.Cog, name="Norm"):
         aliases=["norma", "playtime_norm"],
         description="Просмотр суточной нормы онлайна сотрудника (чистый онлайн за сегодня с 00:00 MSK)",
     )
-    @app_commands.describe(target="Никнейм в игре или @Discord сотрудника (если пусто — своя норма или список всех)")
+    @app_commands.describe(target="Никнейм в игре или @Discord сотрудника (если пусто — ваша норма)")
     async def cmd_norm(self, ctx: commands.Context, *, target: str = None):
-        """Отображает текущий прогресс суточной нормы онлайна сотрудника или всех сотрудников."""
+        """Отображает текущий прогресс суточной нормы только выбранного сотрудника."""
         await ctx.defer()
 
         guild = ctx.guild or self.bot.get_guild(GUILD_ID)
@@ -86,63 +87,17 @@ class NormCog(commands.Cog, name="Norm"):
 
         admin_caller = self.staff_resolver.is_admin_or_higher(ctx.author, guild)
 
+        # Без аргумента /norm ВСЕГДА показывает только вызывающего команду.
+        # Общий отчёт по персоналу предназначен исключительно для /check_norm.
         if not target:
-            if admin_caller:
-                staff_list = [s for s in self.sheets_monitor.get_staff_list() if s.get("nick")] if self.sheets_monitor else []
-                if not staff_list:
-                    await ctx.send("ℹ️ Список персонала пуст.")
-                    return
-
-                nicks = [s["nick"] for s in staff_list]
-                playtime_data = await self.playtime_tracker.fetch_playtime_for_staff(nicks)
-
-                embed = discord.Embed(
-                    title="⏱ Суточная норма онлайна персонала (За сегодня)",
-                    color=0x5865F2,
-                    description=(
-                        "**Регламент:** 1 час в сутки (чистый онлайн за день с 00:00 MSK).\n"
-                        "Для подробной карточки сотрудника используйте `/norm <ник>`."
-                    ),
-                    timestamp=datetime.now(timezone.utc),
+            if not author_staff or not author_staff.get("nick"):
+                await ctx.send(
+                    "❌ Ваш Minecraft-ник не найден в Google Sheets (лист «Списки»). "
+                    "Добавьте себя в таблицу или укажите сотрудника, если у вас есть права.",
+                    ephemeral=True,
                 )
-
-                lines = []
-                for s in staff_list:
-                    nick = s["nick"]
-                    pos = s.get("position", "Сотрудник")
-                    exempt = self.playtime_tracker.is_norm_exempt(pos, nick)
-
-                    p_info = playtime_data.get(nick.lower(), {})
-                    curr_h = p_info.get("hours", 0.0)
-
-                    snapshot = self.sheets_monitor.mc_playtime_snapshots.get(nick.lower()) if self.sheets_monitor else None
-                    if not snapshot and curr_h > 0.0 and self.sheets_monitor:
-                        today_k = (datetime.now(ZoneInfo("Europe/Moscow"))).strftime("%Y-%m-%d")
-                        snapshot = {
-                            "hours": curr_h,
-                            "date": today_k,
-                            "timestamp": datetime.now(timezone.utc).timestamp(),
-                        }
-                        self.sheets_monitor.mc_playtime_snapshots[nick.lower()] = snapshot
-                        self.sheets_monitor._save_state()
-
-                    delta_h, is_baseline = self.playtime_tracker.calculate_today_norm_delta(curr_h, snapshot)
-                    delta_str = self.playtime_tracker.format_hours_delta(delta_h)
-
-                    if exempt:
-                        status = f"👑 `{nick}` ({pos}): **{delta_str}** *(без нормы)*"
-                    elif delta_h >= DAILY_NORM_HOURS:
-                        status = f"🟢 `{nick}` ({pos}): **{delta_str}** / 1ч ✅"
-                    else:
-                        status = f"🔴 `{nick}` ({pos}): **{delta_str}** / 1ч ⏳"
-                    lines.append(status)
-
-                embed.add_field(name="📋 Состав персонала", value="\n".join(lines)[:4000], inline=False)
-                embed.set_footer(text="WeriGrief Staff System • Режим онлайн-мониторинга")
-                await ctx.send(embed=embed)
                 return
-            else:
-                target = ctx.author.mention
+            target = author_staff["nick"]
 
         mc_nick, member = self.staff_resolver.resolve_query_to_target(guild, target)
 
@@ -160,6 +115,12 @@ class NormCog(commands.Cog, name="Norm"):
         if info["is_exempt"]:
             color = 0x3498DB
             status_text = "👑 **Освобожден от обязательной нормы** (руководство / решение администрации)"
+        elif not info.get("daily_reliable", False):
+            color = 0xF1C40F
+            status_text = (
+                "⚠️ **Измерение за сегодня неполное.** "
+                "Норма пока не оценивается, предупреждение за этот день не выдаётся."
+            )
         elif info["norm_met"]:
             color = 0x2ECC71
             status_text = f"✅ **Суточная норма выполнена!** ({info['today_str']} / 1ч 00м)"

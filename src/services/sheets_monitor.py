@@ -41,12 +41,27 @@ class SheetsSyncTask:
         if self._midnight_task is None or self._midnight_task.done():
             self._midnight_task = asyncio.create_task(self._run_midnight_schedule())
 
-    def stop(self):
-        """Останавливает фоновые задачи."""
+    async def stop(self):
+        """Останавливает и дожидается завершения фоновых задач."""
         if self._loop.is_running():
+            loop_task = self._loop.get_task()
             self._loop.stop()
-        if self._midnight_task and not self._midnight_task.done():
-            self._midnight_task.cancel()
+
+            if loop_task and not loop_task.done():
+                try:
+                    await loop_task
+                except asyncio.CancelledError:
+                    pass
+
+        midnight_task = self._midnight_task
+        self._midnight_task = None
+
+        if midnight_task and not midnight_task.done():
+            midnight_task.cancel()
+            try:
+                await midnight_task
+            except asyncio.CancelledError:
+                pass
 
     async def _run_midnight_schedule(self):
         await self.bot.wait_until_ready()

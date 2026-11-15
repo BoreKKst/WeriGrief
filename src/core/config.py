@@ -92,3 +92,9 @@ LEADERSHIP_IDS = {
     1279748957358002276,  # fenix_763
 }
 
+
+# Minecraft Query — сбор подтверждённого онлайна
+MC_QUERY_HOST = os.getenv("MC_QUERY_HOST", "m1.nexuz.ru").strip()
+MC_QUERY_PORT = int(os.getenv("MC_QUERY_PORT", "25737"))
+MC_QUERY_INTERVAL = int(os.getenv("MC_QUERY_INTERVAL", "30"))
+MC_QUERY_TIMEOUT = float(os.getenv("MC_QUERY_TIMEOUT", "5"))

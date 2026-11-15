@@ -1,0 +1,1 @@
+"""WeriGrief virtual pets."""

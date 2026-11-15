@@ -3,6 +3,7 @@ Entry point for WeriGrief Staff Management Bot.
 Initializes bot, registers services, cogs, UI components and event listeners.
 """
 
+import asyncio
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import discord
@@ -12,17 +13,21 @@ from discord.ext import commands
 from src.core.config import (
     TOKEN, GUILD_ID, SPREADSHEET_ID, GOOGLE_CREDS_FILE, log
 )
+from src.core.database import init_db, close_db
 from src.services.staff_resolver import StaffResolver
 from src.services.playtime import PlaytimeTracker
 from src.services.sheets_monitor import SheetsSyncTask
 from src.services.automod import AutomodService
 from src.ui.views import (
-    RulesView, CreateTicketConfirmView, TicketControlView, create_report_ticket
+    RulesView, CreateTicketConfirmView, TicketControlView,
+    create_report_ticket
 )
 from src.cogs.warnings import WarningsCog
 from src.cogs.staff import StaffCog
 from src.cogs.norm import NormCog
-
+from src.modules.economy.cog import EconomyCog
+from src.modules.pets.cog import PetsCog
+from src.modules.tickets.cog import TicketsCog
 from src.services.sheets_api import SheetsMonitor
 
 
@@ -158,35 +163,21 @@ async def on_ready():
         playtime_tracker = PlaytimeTracker(sheets_monitor, staff_resolver)
         automod_service = AutomodService(staff_resolver)
 
-        # Снятие первичного baseline-слепка онлайна, если база пуста
-        if not sheets_monitor.mc_playtime_snapshots:
-            try:
-                active_staff = [s for s in sheets_monitor.get_staff_list() if s.get("nick")]
-                if active_staff:
-                    nicks = [s["nick"] for s in active_staff]
-                    pt_data = await playtime_tracker.fetch_playtime_for_staff(nicks)
-                    today_k = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d")
-                    for n in nicks:
-                        info = pt_data.get(n.lower())
-                        if info is None:
-                            continue
-                        sheets_monitor.mc_playtime_snapshots[n.lower()] = {
-                            "hours": info.get("hours", 0.0),
-                            "date": today_k,
-                            "timestamp": datetime.now(timezone.utc).timestamp(),
-                        }
-                    if sheets_monitor.mc_playtime_snapshots:
-                        sheets_monitor._save_state()
-                        log.info(f"Initialized MC playtime baseline snapshots for {len(sheets_monitor.mc_playtime_snapshots)} staff members")
-                    else:
-                        log.warning("No Minecraft stats were readable; baseline was not initialized. Check Pterodactyl API key, server ID, MC_STATS_DIRECTORY and UUID mode.")
-            except Exception as e:
-                log.warning(f"Could not take initial playtime snapshot: {e}")
+        # Запуск Minecraft Query + PostgreSQL трекера
+        await playtime_tracker.start_query_tracking()
 
         # Подключение Cogs
         await bot.add_cog(WarningsCog(bot, sheets_monitor, staff_resolver))
         await bot.add_cog(StaffCog(bot, sheets_monitor, staff_resolver))
         await bot.add_cog(NormCog(bot, sheets_monitor, staff_resolver, playtime_tracker))
+        await bot.add_cog(EconomyCog(bot))
+        await bot.add_cog(PetsCog(bot))
+        await bot.add_cog(TicketsCog(bot))
+
+        # Одноразовое публичное объявление об обновлении
+        from src.modules.announcements import publish_update_announcement
+        await publish_update_announcement(bot)
+
 
         # Синхронизация slash-команд после загрузки Cogs
         if guild:
@@ -209,15 +200,41 @@ async def on_ready():
         log.error(f"Failed to init Sheets monitor or services: {e}", exc_info=True)
 
 
+async def run_bot():
+    """Запускает Discord-бота с PostgreSQL."""
+    await init_db()
+    try:
+        async with bot:
+            await bot.start(TOKEN)
+    finally:
+        # Сначала останавливаем фоновые задачи, пока PostgreSQL доступен.
+        if sheets_sync_task:
+            try:
+                await sheets_sync_task.stop()
+                log.info("Sheets background tasks stopped")
+            except Exception:
+                log.exception("Failed to stop Sheets background tasks")
+
+        if playtime_tracker:
+            try:
+                await playtime_tracker.stop_query_tracking()
+                log.info("Minecraft Query tracker stopped")
+            except Exception:
+                log.exception("Failed to stop Minecraft Query tracker")
+
+        await close_db()
+
+
+
 def main():
     """Точка входа запуска бота."""
     if not TOKEN:
         log.error("BOT_TOKEN not set in environment!")
         return
+
     log.info("Starting WeriGrief Staff Management Bot...")
-    bot.run(TOKEN)
+    asyncio.run(run_bot())
 
 
 if __name__ == "__main__":
     main()
-

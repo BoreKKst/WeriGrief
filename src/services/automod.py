@@ -47,6 +47,20 @@ class AutomodService:
                 # Разрешенные домены проекта и гифок
                 if any(host == d or host.endswith("." + d) for d in WHITELISTED_LINK_DOMAINS):
                     continue
+                # Официальное приглашение WeriGrief — разрешено только по точному коду
+                if host in ("discord.gg", "discord.com", "discordapp.com"):
+                    parts = [part for part in parsed.path.split("/") if part]
+                    official_invite = (
+                        (host == "discord.gg" and len(parts) >= 1 and parts[0].lower() == "cszwechfn")
+                        or
+                        (host in ("discord.com", "discordapp.com")
+                         and len(parts) >= 2
+                         and parts[0].lower() == "invite"
+                         and parts[1].lower() == "cszwechfn")
+                    )
+                    if official_invite:
+                        continue
+
                 # Внутренние ссылки Discord на каналы текущего сервера
                 if host in ("discord.com", "discordapp.com") and parsed.path.startswith(f"/channels/{guild_id}/"):
                     continue

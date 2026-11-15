@@ -5,7 +5,7 @@ Discord staff-management bot assembled from the current WeriGrief archive, retai
 ## Install and run (Termux, without venv)
 
 ```bash
-cd ~/WeriGrief
+cd ~/WeriGrief-StaffBot
 pkg update -y
 pkg install python -y
 pip install -r requirements.txt
