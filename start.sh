@@ -2,7 +2,7 @@
 cd "$HOME/WeriGrief"
 
 while true; do
-    echo "[$(date)] Запуск WeriGrief..."
+    echo "[$(date)] Запуск WeriTime..."
     python main.py
     CODE=$?
     echo "[$(date)] Бот остановился (код $CODE). Перезапуск через 10 секунд..."

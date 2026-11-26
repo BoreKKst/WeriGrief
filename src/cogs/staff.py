@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from src.core.config import GUILD_ID, STAFF_NOTIFY_CHANNEL, LEADERSHIP_IDS
 from src.utils.embeds import EmbedBuilder
 from src.services.permissions import (
-    StaffRoleManager, MinecraftPermissionsManager, POSITION_ORDER
+    StaffRoleManager, MinecraftPermissionsManager, POSITION_ORDER,
+    POSITION_CHOICES, normalize_position_for_order,
 )
 
 
@@ -23,7 +24,7 @@ class StaffCog(commands.Cog, name="Staff"):
 
     @commands.hybrid_command(
         name="staff",
-        description="Показать официальный состав персонала WeriGrief",
+        description="Показать официальный состав персонала WeriTime",
     )
     async def cmd_staff(self, ctx: commands.Context):
         """Красивый реестр персонала из Google Sheets."""
@@ -47,16 +48,12 @@ class StaffCog(commands.Cog, name="Staff"):
             await ctx.send(f"❌ Не удалось загрузить персонал из Google Sheets: `{e}`")
             return
 
-        display_order = [
-            "CREATOR", "GL.OWNER", "OWNER", "D.OWNER",
-            "GL.CURATOR", "CURATOR", "Z.CURATOR",
-            "GL.ADMIN", "ADMIN", "ML.ADMIN", "D.ADMIN",
-            "GL.MODER", "ST.MODER", "MODER", "ML.MODER", "D.MODER",
-            "HELPER", "D.HELPER",
-            "Гл.Разработчик", "Разработчик", "PR Manager",
-            "Сотрудник проекта", "На испытании", "Кандидат",
-        ]
-        rank = {name.casefold(): i for i, name in enumerate(display_order)}
+        display_order = [normalize_position_for_order(position) for position in reversed(POSITION_ORDER)]
+        rank = {name: i for i, name in enumerate(display_order)}
+        display_names = {
+            normalize_position_for_order(value): label
+            for label, value in POSITION_CHOICES
+        }
 
         groups = []
         section_name = "Основной состав"
@@ -83,7 +80,7 @@ class StaffCog(commands.Cog, name="Staff"):
 
         if total == 0:
             embed = discord.Embed(
-                title="✦ WeriGrief | STAFF DIRECTORY",
+                title="✦ WeriTime | STAFF DIRECTORY",
                 description=(
                     "Официальный реестр персонала\n\n"
                     "В Google Sheets не найдено ни одной записи с заполненным ником. "
@@ -92,7 +89,7 @@ class StaffCog(commands.Cog, name="Staff"):
                 color=0x19324D,
                 timestamp=datetime.now(timezone.utc),
             )
-            embed.set_footer(text="WERIGRIEF • STAFF SYSTEM")
+            embed.set_footer(text="WERITIME • STAFF SYSTEM")
             await ctx.send(embed=embed)
             return
 
@@ -101,7 +98,7 @@ class StaffCog(commands.Cog, name="Staff"):
         for name, entries in groups:
             entries.sort(
                 key=lambda item: rank.get(
-                    str(item.get("position") or "").strip().casefold(),
+                    normalize_position_for_order(str(item.get("position") or "")),
                     len(display_order),
                 )
             )
@@ -109,7 +106,11 @@ class StaffCog(commands.Cog, name="Staff"):
             lines = []
             for entry in entries:
                 nick = str(entry.get("nick") or "").strip()
-                position = str(entry.get("position") or "Сотрудник").strip()
+                position_key = normalize_position_for_order(str(entry.get("position") or ""))
+                position = display_names.get(
+                    position_key,
+                    str(entry.get("position") or "Сотрудник").strip(),
+                )
                 discord_name = str(entry.get("discord") or "").strip()
                 hours = str(entry.get("hours") or "0").strip()
                 warns = str(entry.get("warns") or "0").strip()
@@ -170,7 +171,7 @@ class StaffCog(commands.Cog, name="Staff"):
 
         for page_index, page_fields in enumerate(pages, start=1):
             embed = discord.Embed(
-                title="✦ WeriGrief  /  STAFF DIRECTORY",
+                title="✦ WeriTime  /  STAFF DIRECTORY",
                 description=description if page_index == 1 else (
                     f"**Официальный состав проекта** · {total} сотрудников"
                 ),
@@ -186,7 +187,7 @@ class StaffCog(commands.Cog, name="Staff"):
                 )
 
             embed.set_footer(
-                text=f"WERIGRIEF STAFF SYSTEM  •  PAGE {page_index}/{len(pages)}"
+                text=f"WERITIME STAFF SYSTEM  •  PAGE {page_index}/{len(pages)}"
             )
             await ctx.send(embed=embed)
 
@@ -233,14 +234,14 @@ class StaffCog(commands.Cog, name="Staff"):
                 inline=False,
             )
 
-        embed.set_footer(text="WeriGrief Staff System • Префикс: !dismissed / Слэш: /dismissed")
+        embed.set_footer(text="WeriTime Staff System • Префикс: !dismissed / Слэш: /dismissed")
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(
         name="promote",
         description="Повысить сотрудника и выбрать новую должность",
     )
-    @app_commands.choices(position=[app_commands.Choice(name=role, value=role) for role in POSITION_ORDER])
+    @app_commands.choices(position=[app_commands.Choice(name=label, value=value) for label, value in POSITION_CHOICES])
     @app_commands.describe(
         target="Сотрудник: ник Minecraft или Discord-упоминание",
         position="Выберите новую должность выше текущей",
@@ -270,8 +271,9 @@ class StaffCog(commands.Cog, name="Staff"):
             await ctx.send(f"❌ `{mc_nick}` не найден в активном составе.")
             return
         current = str(entry.get("position", "")).strip()
+        current_for_order = normalize_position_for_order(current)
         idx = next((i for i, x in enumerate(POSITION_ORDER)
-                    if x.casefold() == current.casefold()), None)
+                    if normalize_position_for_order(x) == current_for_order), None)
         if idx is None:
             await ctx.send(f"❌ Не удалось определить текущую должность `{current}`. Используй `/appoint` для выбора должности.")
             return
@@ -280,7 +282,7 @@ class StaffCog(commands.Cog, name="Staff"):
             return
         new_position = position
         new_idx = next((i for i, x in enumerate(POSITION_ORDER)
-                        if x.casefold() == new_position.casefold()), None)
+                        if normalize_position_for_order(x) == normalize_position_for_order(new_position)), None)
         if new_idx is None or new_idx <= idx:
             await ctx.send("❌ Для повышения выбери должность выше текущей.")
             return
@@ -320,7 +322,7 @@ class StaffCog(commands.Cog, name="Staff"):
         name="demote",
         description="Понизить сотрудника и выбрать новую должность",
     )
-    @app_commands.choices(position=[app_commands.Choice(name=role, value=role) for role in POSITION_ORDER])
+    @app_commands.choices(position=[app_commands.Choice(name=label, value=value) for label, value in POSITION_CHOICES])
     @app_commands.describe(
         target="Сотрудник: ник Minecraft или Discord-упоминание",
         position="Выберите новую должность ниже текущей",
@@ -350,8 +352,9 @@ class StaffCog(commands.Cog, name="Staff"):
             await ctx.send(f"❌ `{mc_nick}` не найден в активном составе.")
             return
         current = str(entry.get("position", "")).strip()
+        current_for_order = normalize_position_for_order(current)
         idx = next((i for i, x in enumerate(POSITION_ORDER)
-                    if x.casefold() == current.casefold()), None)
+                    if normalize_position_for_order(x) == current_for_order), None)
         if idx is None:
             await ctx.send(f"❌ Не удалось определить текущую должность `{current}`.")
             return
@@ -360,7 +363,7 @@ class StaffCog(commands.Cog, name="Staff"):
             return
         new_position = position
         new_idx = next((i for i, x in enumerate(POSITION_ORDER)
-                        if x.casefold() == new_position.casefold()), None)
+                        if normalize_position_for_order(x) == normalize_position_for_order(new_position)), None)
         if new_idx is None or new_idx >= idx:
             await ctx.send("❌ Для понижения выбери должность ниже текущей.")
             return
@@ -419,6 +422,9 @@ class StaffCog(commands.Cog, name="Staff"):
         except ValueError as exc:
             await ctx.send(f"❌ {exc}", ephemeral=True)
             return
+        except RuntimeError as exc:
+            await ctx.send(f"❌ {exc}", ephemeral=True)
+            return
         from datetime import date
         start_date = date.fromisoformat(vacation["start"]).strftime("%d.%m.%Y")
         end_date = date.fromisoformat(vacation["end"]).strftime("%d.%m.%Y")
@@ -432,8 +438,43 @@ class StaffCog(commands.Cog, name="Staff"):
         embed.add_field(name="📅 Окончание", value=f"`{end_date}`", inline=True)
         embed.add_field(name="📌 Статус нормы", value="Освобождение от суточной нормы активно на период отпуска", inline=False)
         embed.add_field(name="👮 Оформил", value=ctx.author.mention, inline=True)
-        embed.set_footer(text="WeriGrief Staff System • Отпуск")
+        embed.set_footer(text="WeriTime Staff System • Отпуск")
         await ctx.send(embed=embed, ephemeral=True)
+
+    @commands.hybrid_command(
+        name="unvacation",
+        aliases=["снять_отпуск"],
+        description="Досрочно завершить отпуск сотрудника",
+    )
+    @app_commands.describe(target="Ник сотрудника; пусто — снять свой отпуск")
+    async def cmd_unvacation(self, ctx: commands.Context, *, target: str = ""):
+        await ctx.defer(ephemeral=True)
+        if not self.sheets_monitor:
+            await ctx.send("❌ Google Sheets ещё инициализируется.", ephemeral=True)
+            return
+
+        caller_entry = self.staff_resolver.get_staff_entry_for_member(ctx.author)
+        if not caller_entry:
+            await ctx.send("❌ Команда доступна только действующему персоналу.", ephemeral=True)
+            return
+
+        nick = caller_entry.get("nick", "")
+        if target.strip():
+            guild = ctx.guild or self.bot.get_guild(GUILD_ID)
+            if not self.staff_resolver.is_admin_or_higher(ctx.author, guild):
+                await ctx.send("❌ Досрочно завершить отпуск другого сотрудника может только администрация.", ephemeral=True)
+                return
+            nick, _member = self.staff_resolver.resolve_query_to_target(guild, target)
+
+        try:
+            if not self.sheets_monitor.clear_vacation(nick):
+                await ctx.send(f"ℹ️ Для `{nick}` активный отпуск не найден.", ephemeral=True)
+                return
+        except RuntimeError as exc:
+            await ctx.send(f"❌ {exc}", ephemeral=True)
+            return
+
+        await ctx.send(f"✅ Отпуск для `{nick}` завершён досрочно.", ephemeral=True)
 
     @app_commands.command(
         name="unstaff",
@@ -478,19 +519,47 @@ class StaffCog(commands.Cog, name="Staff"):
             )
             return
 
+        removed_roles: list[str] = []
+        blocked_roles: list[str] = []
         if member:
-            await StaffRoleManager.strip_discord_staff_roles(
-                member, reason=f"Сотрудник снят с должности администратором {author_nick}"
-            )
+            try:
+                removed_roles, blocked_roles = await StaffRoleManager.strip_discord_staff_roles(
+                    member,
+                    reason=f"Сотрудник снят с должности администратором {author_nick}",
+                )
+            except Exception:
+                log.exception("Failed to remove Discord staff roles for %s", mc_nick)
+
+        role_status = (
+            f"Сняты: {', '.join(removed_roles) or 'нет'}. "
+            f"Не удалось снять из-за иерархии: {', '.join(blocked_roles)}."
+            if blocked_roles else f"Сняты: {', '.join(removed_roles) or 'не обнаружены'}."
+        )
+
+        minecraft_ok = False
+        try:
+            minecraft_ok = await MinecraftPermissionsManager.revoke_minecraft_permissions(mc_nick)
+        except Exception:
+            log.exception("Failed to revoke Minecraft staff groups for %s", mc_nick)
+
+        minecraft_status = (
+            "Команды снятия должностных групп отправлены."
+            if minecraft_ok else "Не удалось подтвердить отправку команд. Требуется проверка."
+        )
+
+        if member:
             await EmbedBuilder.send_dismissal_dm(
                 member,
                 nick=removed_info["nick"],
                 position=removed_info.get("position", "Сотрудник"),
                 removed_by=author_nick,
                 reason=reason,
+                warnings_history=removed_info.get("warnings_history", []),
+                automatic=False,
+                role_status=role_status,
+                minecraft_status=minecraft_status,
             )
 
-        await MinecraftPermissionsManager.revoke_minecraft_permissions(mc_nick)
         staff_channel = self.bot.get_channel(STAFF_NOTIFY_CHANNEL)
         embed = EmbedBuilder.build_staff_removed_embed(
             nick=removed_info["nick"],
@@ -499,6 +568,13 @@ class StaffCog(commands.Cog, name="Staff"):
             removed_by=author_nick,
             reason=reason,
         )
+        embed.add_field(
+            name="📚 Архив предупреждений",
+            value=str(len(removed_info.get("warnings_history", []))),
+            inline=True,
+        )
+        embed.add_field(name="🎭 Discord-роли", value=role_status[:1024], inline=False)
+        embed.add_field(name="⛏️ LuckPerms", value=minecraft_status, inline=False)
         ping_text = f"{member.mention} " if member else ""
         if staff_channel:
             await staff_channel.send(content=ping_text, embed=embed)
@@ -513,7 +589,7 @@ class StaffCog(commands.Cog, name="Staff"):
         description="Назначить сотрудника в персонал (для руководства)",
     )
     @app_commands.choices(position=[
-        app_commands.Choice(name=role, value=role) for role in POSITION_ORDER
+        app_commands.Choice(name=label, value=value) for label, value in POSITION_CHOICES
     ])
     @app_commands.describe(
         target="Никнейм в игре или @Discord сотрудника",

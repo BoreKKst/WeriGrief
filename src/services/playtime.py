@@ -16,6 +16,7 @@ from src.core.config import (
 from src.services.query_tracker import QueryPlaytimeStore
 from src.utils.embeds import EmbedBuilder
 from src.services.permissions import MinecraftPermissionsManager
+from src.services.auto_dismissal import auto_dismiss_staff
 
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -39,27 +40,35 @@ class PlaytimeTracker:
         return f"{m}м"
 
     def is_norm_exempt(self, position: str, mc_nick: str = "") -> bool:
+        nick = mc_nick.strip().casefold()
+        nick_no_us = nick.replace("_", "")
+
+        if self.sheets_monitor:
+            # Ручное включение нормы имеет наивысший приоритет.
+            if (
+                self.sheets_monitor.is_custom_required(nick)
+                or self.sheets_monitor.is_custom_required(nick_no_us)
+            ):
+                return False
+
+            # Ручное освобождение имеет приоритет над должностью.
+            if (
+                self.sheets_monitor.is_custom_exempt(nick)
+                or self.sheets_monitor.is_custom_exempt(nick_no_us)
+            ):
+                return True
+
         pos = str(position or "").casefold()
         keywords = (
             "creator", "creators",
             "owner", "owners",
             "curator", "curators",
             "создатель", "создатели",
-            "владелец", "владельцы",
+            "Creator", "владельцы",
             "куратор", "кураторы",
             "руковод",
         )
-        if any(word in pos for word in keywords):
-            return True
-
-        nick = mc_nick.strip().casefold()
-        nick_no_us = nick.replace("_", "")
-        if self.sheets_monitor:
-            return (
-                self.sheets_monitor.is_custom_exempt(nick)
-                or self.sheets_monitor.is_custom_exempt(nick_no_us)
-            )
-        return False
+        return any(word in pos for word in keywords)
 
     async def start_query_tracking(self):
         if self.sheets_monitor:
@@ -136,8 +145,17 @@ class PlaytimeTracker:
         total_hours = await self.query_store.total_seconds(nick) / 3600
         today_hours = await self.query_store.daily_seconds(nick, day) / 3600
 
-        norm_met = reliable and today_hours >= DAILY_NORM_HOURS
-        remaining = max(0.0, DAILY_NORM_HOURS - today_hours)
+        appointed_at = str(matched.get("appointed_at", "")).strip()[:10]
+        norm_not_started = bool(appointed_at and appointed_at == day)
+
+        norm_met = (
+            False if norm_not_started
+            else reliable and today_hours >= DAILY_NORM_HOURS
+        )
+        remaining = (
+            0.0 if norm_not_started
+            else max(0.0, DAILY_NORM_HOURS - today_hours)
+        )
         percent = min(
             100,
             int(today_hours / DAILY_NORM_HOURS * 100)
@@ -151,6 +169,7 @@ class PlaytimeTracker:
             "sheet_hours": matched.get("hours", "0"),
             "warn_count": matched.get("warns", "0"),
             "is_exempt": self.is_norm_exempt(position, nick),
+            "norm_not_started": norm_not_started,
             "lifetime_hours": total_hours,
             "lifetime_str": self.format_hours_delta(total_hours),
             "today_delta": today_hours,
@@ -204,7 +223,7 @@ class PlaytimeTracker:
                         f"⏱ **Отыграно времени:** **{hours_str}** ({total_hours:.1f} ч.)\n"
                         f"📌 **Должность:** {position}\n"
                         f"📅 **Дата:** `{date_str}`\n\n"
-                        f"Спасибо за активную работу и вклад в развитие проекта **✨WeriGrief✨**! 🚀"
+                        f"Спасибо за активную работу и вклад в развитие проекта **✨WeriTime✨**! 🚀"
                     ),
                     timestamp=datetime.now(timezone.utc),
                 )
@@ -225,11 +244,11 @@ class PlaytimeTracker:
                         f"📅 **Дата:** `{date_str}`\n"
                         f"{warn_field}\n\n"
                         f"*(При наборе 3-х предупреждений автоматически выдается роль испытательного срока).*\n"
-                        f"Пожалуйста, соблюдайте нормы активности на проекте **✨WeriGrief✨**."
+                        f"Пожалуйста, соблюдайте нормы активности на проекте **✨WeriTime✨**."
                     ),
                     timestamp=datetime.now(timezone.utc),
                 )
-            embed.set_footer(text="WeriGrief Staff System • Контроль онлайна")
+            embed.set_footer(text="WeriTime Staff System • Контроль онлайна")
 
             try:
                 await member.send(embed=embed)
@@ -248,6 +267,7 @@ class PlaytimeTracker:
         dry_run: bool = False,
         is_midnight: bool = False,
         send_summary: bool = True,
+        issue_warnings: bool = False,
     ) -> dict:
         if not self.sheets_monitor:
             log.error("Sheets monitor not ready")
@@ -261,9 +281,11 @@ class PlaytimeTracker:
             return {"error": "No staff found"}
 
         now = datetime.now(MSK)
+        # При ручной выдаче проверяем последние закрытые сутки.
         target_date = (
             now.date() - timedelta(days=1)
-            if is_midnight else now.date()
+            if is_midnight or (dry_run and issue_warnings)
+            else now.date()
         )
         day = target_date.strftime("%Y-%m-%d")
         date_str = target_date.strftime("%d.%m.%Y")
@@ -280,6 +302,7 @@ class PlaytimeTracker:
         failed_list = []
         exempt_list = []
         vacation_list = []
+        newcomer_list = []
         hours_delta_map = {}
 
         # Сначала собираем всё подтверждённое время.
@@ -294,6 +317,14 @@ class PlaytimeTracker:
 
             if hours > 0:
                 hours_delta_map[nick.casefold()] = hours
+
+            # В день назначения новичок ещё не обязан выполнять норму.
+            appointed_at = str(staff.get("appointed_at", "")).strip()[:10]
+            if appointed_at and appointed_at == day:
+                newcomer_list.append(
+                    (nick, position, self.format_hours_delta(hours), hours)
+                )
+                continue
 
             if self.sheets_monitor.is_on_vacation(nick):
                 vacation_list.append(
@@ -335,7 +366,13 @@ class PlaytimeTracker:
 
             await self.query_store.mark_day_credited(day)
 
-        actions_allowed = should_credit and reliable
+        actions_allowed = should_credit
+        # Личные сообщения и начисление часов — только при первом закрытии дня.
+        # Автоматическая выдача в полночь или подтверждённая ручная выдача.
+        warnings_allowed = (
+            (is_midnight and not dry_run)
+            or (dry_run and issue_warnings)
+        )
 
         warn_channel = (
             guild.get_channel(WARN_NOTIFY_CHANNEL)
@@ -361,8 +398,8 @@ class PlaytimeTracker:
             ) as exc:
                 log.error("Cannot fetch staff report channel: %s", exc)
 
-        # Предупреждения только за полностью надёжный день.
-        if actions_allowed:
+        # Предупреждения только при автоматическом закрытии дня в 00:00 МСК.
+        if warnings_allowed:
             for item in failed_list:
                 nick, position, hours_str, hours, _ = item
                 member = (
@@ -374,32 +411,28 @@ class PlaytimeTracker:
                     f"(наиграно: {hours_str} из "
                     f"{DAILY_NORM_HOURS:g}ч)"
                 )
-                total_warns = self.sheets_monitor.add_warning(
-                    nick, date_str, reason,
-                    "Система контроля нормы",
+                total_warns, warning_created, warning_ok = (
+                    self.sheets_monitor.add_warning_once(
+                        nick, date_str, reason,
+                        "Система контроля нормы",
+                    )
                 )
+
+                if not warning_ok:
+                    log.error(
+                        "Automatic warning not confirmed for %s on %s",
+                        nick, date_str,
+                    )
+                    return {
+                        "error": f"Не удалось подтвердить предупреждение для {nick}",
+                    }
                 item_index = failed_list.index(item)
                 failed_list[item_index] = (
                     nick, position, hours_str, hours, total_warns
                 )
 
-                if total_warns >= 3 and member:
-                    role = discord.utils.get(
-                        guild.roles, name="⚠️ На испытании"
-                    )
-                    if role and role not in member.roles:
-                        try:
-                            await member.add_roles(
-                                role,
-                                reason="Авто-предупреждение: норма онлайна",
-                            )
-                        except Exception:
-                            log.exception(
-                                "Failed to add probation role to %s",
-                                member,
-                            )
 
-                if warn_channel and total_warns > 0:
+                if warning_created and warn_channel and total_warns > 0:
                     embed = EmbedBuilder.build_warn_embed(
                         nick, date_str, reason,
                         "Система контроля нормы", total_warns,
@@ -412,10 +445,17 @@ class PlaytimeTracker:
                     except discord.HTTPException:
                         log.exception("Failed to send norm warning")
 
-                if total_warns > 0:
+                if warning_created and total_warns > 0:
                     await MinecraftPermissionsManager.send_private_minecraft_warning(
                         nick, reason, total_warns,
                         source="Персонал / контроль нормы",
+                    )
+
+                if warning_created and total_warns >= 3:
+                    await auto_dismiss_staff(
+                        self.bot, self.sheets_monitor,
+                        self.staff_resolver, guild, nick,
+                        reason="Автоматическое снятие: получено 3 предупреждения за нарушения суточной нормы онлайна",
                     )
 
         # Личные сообщения — только при надёжном ежедневном закрытии.
@@ -457,7 +497,7 @@ class PlaytimeTracker:
         # Отчёт
         preview = " (ПРЕДВАРИТЕЛЬНО)" if dry_run else ""
         embed = discord.Embed(
-            title=f"📊 Проверка суточной нормы WeriGrief — {date_str}{preview}",
+            title=f"📊 Проверка суточной нормы WeriTime — {date_str}{preview}",
             color=0x5865F2 if dry_run else (
                 0x2ECC71 if not failed_list else 0xE67E22
             ),
@@ -467,11 +507,7 @@ class PlaytimeTracker:
                 f"🟢 Выполнили: **{len(met_list)}**\n"
                 f"🔴 Не выполнили: **{len(failed_list)}**\n"
                 f"👑 Освобождены: **{len(exempt_list)}**\n"
-                f"🏖️ В отпуске: **{len(vacation_list)}**"
-                if reliable else
-                f"**Измерение за {date_str} неполное.**\n"
-                f"Предупреждения не выдавались.\n"
-                f"Подтверждённое время будет сохранено в общий онлайн."
+                f"🏖️ В отпуске: **{len(vacation_list)}"
             ),
             timestamp=datetime.now(timezone.utc),
         )
@@ -498,6 +534,11 @@ class PlaytimeTracker:
                 [f"• `{n}` — {p}: **{h}**"
                  for n, p, h, _ in vacation_list],
             ),
+                (
+                    "🆕 Новички — норма ещё не действует",
+                    [f"• `{n}` — {p}: **{h}**"
+                     for n, p, h, _ in newcomer_list],
+                ),
         ]
 
         embeds = [embed]
@@ -536,7 +577,7 @@ class PlaytimeTracker:
 
         for report in embeds:
             report.set_footer(
-                text="WeriGrief Staff System • Minecraft Query"
+                text="WeriTime Staff System • Minecraft Query"
             )
 
         summary_sent = False
@@ -559,6 +600,7 @@ class PlaytimeTracker:
             "failed": len(failed_list),
             "exempt": len(exempt_list),
             "vacation": len(vacation_list),
+            "newcomers": len(newcomer_list),
             "total": len(staff_list),
             "reliable": reliable,
             "credited": should_credit,

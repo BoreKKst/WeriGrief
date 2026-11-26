@@ -1,0 +1,20 @@
+name: WeriAuth
+version: 1.0.0
+main: ru.weritime.auth.WeriAuth
+api-version: '1.21'
+authors: [WeriTime]
+description: Password registration and captcha authentication.
+commands:
+  register:
+    aliases: [reg]
+    usage: /register
+  login:
+    aliases: [l]
+    usage: /login
+  captcha:
+    usage: /captcha <ответ>
+  weriauth:
+    usage: /weriauth <register|changepassword|unreg> <ник>
+permissions:
+  weriauth.bypass:
+    default: op

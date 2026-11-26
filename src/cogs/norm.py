@@ -23,9 +23,17 @@ class NormCog(commands.Cog, name="Norm"):
     @commands.hybrid_command(
         name="check_norm",
         aliases=["checknorm", "syncplaytime"],
-        description="Посмотреть предварительный результат нормы без выдачи предупреждений",
+        description="Проверить суточную норму персонала",
     )
-    async def cmd_check_norm(self, ctx: commands.Context):
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Без предупреждений", value="без пред"),
+        app_commands.Choice(name="С предупреждениями", value="предом"),
+    ])
+    async def cmd_check_norm(
+        self,
+        ctx: commands.Context,
+        mode: app_commands.Choice[str],
+    ):
         """Ручной запуск проверки суточной нормы онлайна."""
         await ctx.defer()
         guild = ctx.guild or self.bot.get_guild(GUILD_ID)
@@ -33,13 +41,16 @@ class NormCog(commands.Cog, name="Norm"):
             await ctx.send("❌ Команда доступна только **Администраторам**, **Старшим администраторам** и руководству проекта.", ephemeral=True)
             return
 
-        # Полная ручная проверка ВСЕГО состава. dry_run=True гарантирует, что
-        # команда не выдаёт варны, не начисляет часы и не меняет baseline/дату
-        # автоматической проверки. Подробный отчёт публикуется в канале Персонал.
+        # Ручная проверка не начисляет часы и не закрывает сутки.
+        # Предупреждения разрешаются отдельным флагом и только при reliable=True.
+        issue_warnings = mode.value == "предом"
         res = await self.playtime_tracker.process_daily_playtime_and_norms(
-            guild, dry_run=True, is_midnight=False, send_summary=True
+            guild,
+            dry_run=True,
+            is_midnight=False,
+            send_summary=True,
+            issue_warnings=issue_warnings,
         )
-        mode_str = "полная проверка состава (без варнов и изменений данных)"
         if res.get("error"):
             await ctx.send(f"❌ {res['error']}")
             return
@@ -49,17 +60,10 @@ class NormCog(commands.Cog, name="Norm"):
                 f"⚠️ Проверка завершена, но отчёт НЕ отправлен в канал Персонал.\n{detail}\n"
                 f"Результат: всего **{res.get('total', 0)}**, выполнили **{res.get('met', 0)}**, "
                 f"не выполнили **{res.get('failed', 0)}**, освобождены **{res.get('exempt', 0)}**.\n"
-                f"Измерение: **{'надёжное' if res.get('reliable') else 'неполное'}**."
             )
             return
 
-        await ctx.send(
-            f"✅ Полная проверка **{res.get('total', 0)} сотрудников** опубликована в <#{STAFF_NOTIFY_CHANNEL}>.\n"
-            f"🟢 Выполнили: **{res.get('met', 0)}** • 🔴 Не выполнили: **{res.get('failed', 0)}** • "
-            f"👑 Освобождены: **{res.get('exempt', 0)}**.\n"
-            f"📡 Измерение: **{'надёжное' if res.get('reliable') else 'неполное'}**.\n"
-            f"Режим: **без предупреждений и изменений таблицы**."
-        )
+        await ctx.send("✅ Проверка нормы выполнена.", ephemeral=True)
 
     @commands.hybrid_command(
         name="norm",
@@ -115,12 +119,9 @@ class NormCog(commands.Cog, name="Norm"):
         if info["is_exempt"]:
             color = 0x3498DB
             status_text = "👑 **Освобожден от обязательной нормы** (руководство / решение администрации)"
-        elif not info.get("daily_reliable", False):
-            color = 0xF1C40F
-            status_text = (
-                "⚠️ **Измерение за сегодня неполное.** "
-                "Норма пока не оценивается, предупреждение за этот день не выдаётся."
-            )
+        elif info.get("norm_not_started", False):
+            color = 0x3498DB
+            status_text = "🆕 **Норма начнётся завтра!** Сегодня — день вступления в состав, выполнять суточную норму пока не требуется."
         elif info["norm_met"]:
             color = 0x2ECC71
             status_text = f"✅ **Суточная норма выполнена!** ({info['today_str']} / 1ч 00м)"
@@ -152,7 +153,7 @@ class NormCog(commands.Cog, name="Norm"):
         embed.add_field(name="📑 Всего часов в таблице", value=f"**{info['sheet_hours']} ч.**", inline=True)
         embed.add_field(name="🎮 Общий онлайн на сервере", value=f"**{info['lifetime_str']}**", inline=True)
 
-        embed.set_footer(text="WeriGrief Staff System • Сброс суточного счетчика в 00:00 MSK")
+        embed.set_footer(text="WeriTime Staff System • Сброс суточного счетчика в 00:00 MSK")
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(
@@ -208,7 +209,7 @@ class NormCog(commands.Cog, name="Norm"):
                 timestamp=datetime.now(timezone.utc),
             )
 
-        embed.set_footer(text=f"Изменил: {ctx.author} • WeriGrief Staff System")
+        embed.set_footer(text=f"Изменил: {ctx.author} • WeriTime Staff System")
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(
@@ -217,21 +218,12 @@ class NormCog(commands.Cog, name="Norm"):
         description="Справочник всех команд для персонала и администрации",
     )
     async def cmd_help_staff(self, ctx: commands.Context):
-        """Справочное меню со всеми командами персонала."""
+        """Общий справочник доступных команд бота."""
         await ctx.defer()
-        author_staff = self.staff_resolver.get_staff_entry_for_member(ctx.author)
-        if not author_staff and ctx.author.id not in LEADERSHIP_IDS:
-            await ctx.send(
-                "❌ **Доступ запрещен:** вы не числитесь в официальной таблице персонала (Google Sheets).\n"
-                "Наличие роли или прав в Discord без записи в таблице не дает права на использование команд персонала.",
-                ephemeral=True,
-            )
-            return
-
         embed = discord.Embed(
-            title="🛡️ Справочник команд WeriGrief Staff System",
+            title="🛡️ Команды WeriTime",
             color=0x5865F2,
-            description="Полный список доступных команд для сотрудников и администрации проекта.",
+            description="Справочник команд. Бот проверяет права отдельно при каждом вызове.",
             timestamp=datetime.now(timezone.utc),
         )
 
@@ -241,7 +233,8 @@ class NormCog(commands.Cog, name="Norm"):
                 "• `/warn <цель> <причина>` — выдать предупреждение сотруднику с записью в таблицу *(Администрация)*\n"
                 "• `/unwarn <цель> [номер/причина]` — снять предупреждение (номер из `/warns` или последнее) *(Администрация)*\n"
                 "• `/warns [цель]` — посмотреть активные предупреждения сотрудника и их причины\n"
-                "• `/clearwarns <цель>` — полностью аннулировать все предупреждения сотрудника *(Руководство)*"
+                "• `/clearwarns <цель>` — полностью аннулировать все предупреждения сотрудника *(Руководство)*\n"
+                "• Автомодерация: мат и оскорбления удаляются, автор получает тайм-аут на 10 минут."
             ),
             inline=False
         )
@@ -261,22 +254,58 @@ class NormCog(commands.Cog, name="Norm"):
             value=(
                 "• `/staff` — актуальный список администрации сервера из Google Таблицы\n"
                 "• `/appoint <цель> <должность>` — назначить сотрудника в персонал (выдача ролей Discord и прав в Minecraft) *(Руководство)*\n"
+                "• `/promote` и `/demote` — изменить должность и синхронизировать роли *(Руководство)*\n"
                 "• `/unstaff <цель> [причина]` — снять сотрудника с должности персонала (снятие ролей и прав) *(Руководство)*\n"
+                "• `/vacation <дни>` — оформить отпуск на 1–15 дней *(сотрудник)*\n"
+                "• `/unvacation [ник]` — завершить свой отпуск; чужой отпуск может завершить администрация\n"
                 "• `/dismissed` — архивный журнал учета снятого персонала («Админ пока») *(Руководство)*"
             ),
             inline=False
         )
 
         embed.add_field(
+            name="🤖 ИИ и комнаты",
+            value=(
+                "• В канале `🤖・ai-помощник` — помощь с кодом, вопросами и домашними заданиями; можно прикрепить изображение для разбора.\n"
+                "• `/image <описание>` — создать изображение по текстовому запросу.\n"
+                "• `/make_file <имя> <задача>` — создать текстовый файл с кодом или документом.\n"
+                "• `/create_room` — создать личную голосовую комнату *(участники сервера)*\n"
+                "• `/room_invite <участник>` и `/room_revoke <участник>` — управлять доступом к своей комнате"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="📨 Заявки и поддержка",
+            value=(
+                "В `📝・набор` выбирают Хелпера или Медиа; в `🛠️・поддержка` — вопрос, баг или жалобу. "
+                "Для жалобы укажи, на администрацию она или участника. Каждый тикет создаётся в отдельном приватном канале; туда можно прикладывать фото."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🎮 Кланы, экономика и игры",
+            value=(
+                "`/clan_create`, `/clan_invite`, `/clan_leave`, `/clan_disband`, `/clan_info` — создать клан, приглашать в ЛС и управлять составом. "
+                "Тег клана отображается рядом с ником, если у бота есть право менять никнеймы.\n"
+                "`/balance`, `/daily`, `/work`, `/shop`, `/buy`, `/inventory`, `/transfer` — экономика и магазин из 15 предметов.\n"
+                "`/guess_character`, `/guess_leaderboard`, `/joke` — мини-игра, таблица побед и шутки."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
             name="ℹ️ Информация о доступе",
             value=(
-                "• **Сотрудники:** просмотр своей нормы (`/norm`), просмотр варнов (`/warns`), список стаффа (`/staff`).\n"
+                "• **Участники:** `/help_staff`, `/create_room`, ИИ-помощник; автомодерация работает для всех пользователей.\n"
+                "• **Сотрудники из Google Sheets:** `/staff`, `/warns`, `/vacation`, просмотр своей нормы (`/norm`).\n"
                 "• **Администраторы и Ст.Администраторы:** выдача и снятие варнов (`/warn`, `/unwarn`), отключение нормы (`/norm_exempt`), проверка нормы любого сотрудника (`/norm`).\n"
                 "• **Руководство (Владельцы, Со-владельцы, Кураторы):** полный доступ ко всем функциям."
             ),
             inline=False
         )
 
-        embed.set_footer(text="WeriGrief Staff System • Префикс: ! / Слэш: /")
+        embed.set_footer(text="WeriTime Staff System • Префикс: ! / Слэш: /")
         await ctx.send(embed=embed)
 

@@ -1,5 +1,5 @@
 """
-WeriGrief Staff Management Bot Launcher.
+WeriTime Staff Management Bot Launcher.
 Starts the modularized bot from src.bot.
 """
 

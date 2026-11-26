@@ -35,7 +35,7 @@ class EmbedBuilder:
                 value="Сотрудник набрал **3+ предупреждений**. Назначена роль `⚠️ На испытании`.",
                 inline=False,
             )
-        embed.set_footer(text="WeriGrief Staff System • Google Sheets Sync")
+        embed.set_footer(text="WeriTime Staff System • Google Sheets Sync")
         return embed
 
     @staticmethod
@@ -65,7 +65,7 @@ class EmbedBuilder:
                 value="Количество предупреждений стало меньше 3. Роль `⚠️ На испытании` автоматически снята.",
                 inline=False,
             )
-        embed.set_footer(text="WeriGrief Staff System • Google Sheets Sync")
+        embed.set_footer(text="WeriTime Staff System • Google Sheets Sync")
         return embed
 
     @staticmethod
@@ -83,7 +83,7 @@ class EmbedBuilder:
             ),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(text="WeriGrief Staff System • Автоматический сброс 1-го числа")
+        embed.set_footer(text="WeriTime Staff System • Автоматический сброс 1-го числа")
         return embed
 
     @staticmethod
@@ -101,7 +101,7 @@ class EmbedBuilder:
     ) -> discord.Embed:
         """Создает Embed о новом назначении в персонал."""
         is_leadership_role = any(
-            term in position.lower() for term in ["владелец", "со-владелец", "куратор", "администратор", "руковод", "глава"]
+            term in position.lower() for term in ["Creator", "Owners", "куратор", "администратор", "руковод", "глава"]
         )
         color = 0xF1C40F if is_leadership_role else 0x2ECC71
         title = "👑 Назначение в Руководство («Вышка»)" if is_leadership_role else "🛡️ Новое назначение в персонал!"
@@ -134,7 +134,7 @@ class EmbedBuilder:
                 name="⚠️ Не удалось выдать роли (иерархия Discord)",
                 value=(
                     f"Роли: {blocked_text}\n"
-                    f"ℹ️ *Роль бота стоит в списке ниже этих ролей. Поднимите роль бота **WeriGrief** в Настройки сервера → Роли выше этих ролей.*"
+                    f"ℹ️ *Роль бота стоит в списке ниже этих ролей. Поднимите роль бота **WeriTime** в Настройки сервера → Роли выше этих ролей.*"
                 ),
                 inline=False,
             )
@@ -151,7 +151,7 @@ class EmbedBuilder:
         if comment:
             embed.add_field(name="📝 Обязанности / Заметки", value=comment[:1000], inline=False)
 
-        embed.set_footer(text="WeriGrief Staff Management • Уведомления о персонале")
+        embed.set_footer(text="WeriTime Staff Management • Уведомления о персонале")
         return embed
 
     @staticmethod
@@ -194,7 +194,7 @@ class EmbedBuilder:
                 name="⚠️ Не удалось выдать роли (иерархия Discord)",
                 value=(
                     f"Роли: {blocked_text}\n"
-                    f"ℹ️ *Роль бота стоит в списке ниже этих ролей. Поднимите роль бота **WeriGrief** в Настройки сервера → Роли выше этих ролей.*"
+                    f"ℹ️ *Роль бота стоит в списке ниже этих ролей. Поднимите роль бота **WeriTime** в Настройки сервера → Роли выше этих ролей.*"
                 ),
                 inline=False,
             )
@@ -203,7 +203,7 @@ class EmbedBuilder:
             mc_status = f"✅ Установлена группа `{mc_group}` (LuckPerms)" if mc_granted else f"⚡ Команда `lp parent set {mc_group}` отправлена"
             embed.add_field(name="🎮 Права в Minecraft", value=mc_status, inline=False)
 
-        embed.set_footer(text="WeriGrief Staff Management • Уведомления о персонале")
+        embed.set_footer(text="WeriTime Staff Management • Уведомления о персонале")
         return embed
 
     @staticmethod
@@ -239,7 +239,7 @@ class EmbedBuilder:
         )
         embed.add_field(name="🧹 Очистка предупреждений", value=clean_note, inline=False)
         embed.add_field(name="📁 Журнал учета", value="Запись о снятии занесена в реестр уволенного персонала", inline=False)
-        embed.set_footer(text="WeriGrief Staff Management • Учет снятых сотрудников")
+        embed.set_footer(text="WeriTime Staff Management • Учет снятых сотрудников")
         return embed
 
     @staticmethod
@@ -249,40 +249,68 @@ class EmbedBuilder:
         position: str,
         removed_by: str = "",
         reason: str = "",
+        warnings_history: list[dict] | None = None,
+        automatic: bool = False,
+        role_status: str = "",
+        minecraft_status: str = "",
     ) -> bool:
-        """Отправляет личное сообщение (DM) уволенному сотруднику."""
+        """Подробное личное уведомление о снятии сотрудника."""
         if not member:
             return False
 
         display_remover = resolve_email_to_nick(removed_by) if removed_by else "Руководство проекта"
-
         embed = discord.Embed(
-            title="👋 Уведомление о снятии с должности",
+            title="⚠️ Автоматическое снятие с должности" if automatic else "👋 Уведомление о снятии с должности",
             color=0xE74C3C,
-            description=(
-                f"Здравствуйте, **{nick}**.\n\n"
-                f"Вы были сняты с должности **{position}** на проекте **✨WeriGrief✨**."
-            ),
+            description=f"Здравствуйте, **{nick}**.\n\nВы сняты с должности **{position}** на проекте **✨WeriTime✨**.",
             timestamp=datetime.now(timezone.utc),
         )
+
+        if automatic:
+            embed.add_field(
+                name="📊 Основание снятия",
+                value="Вы получили **3 предупреждения**. Согласно правилам проекта, при достижении трёх предупреждений сотрудник автоматически снимается с должности.",
+                inline=False,
+            )
         if reason:
-            embed.add_field(name="📋 Причина", value=reason, inline=False)
-        embed.add_field(name="👮 Снял", value=f"`{display_remover}`", inline=True)
+            embed.add_field(name="📋 Причина", value=str(reason)[:1024], inline=False)
+
+        embed.add_field(name="👮 Кто снял", value=f"`{display_remover}`", inline=True)
+
+        history = warnings_history or []
+        if history:
+            lines = [
+                f"**{i}. {item.get('date', '—')}** — {item.get('reason', 'Причина не указана')}\nВыдал: `{item.get('issued_by', 'Неизвестно')}`"
+                for i, item in enumerate(history, 1)
+            ]
+            history_text = "\n\n".join(lines)
+            if len(history_text) > 1024:
+                history_text = history_text[:990] + "\n… Полная история сохранена в журнале."
+        else:
+            history_text = "Подробные записи предупреждений не найдены."
+
+        embed.add_field(name=f"📚 История предупреждений ({len(history)})", value=history_text, inline=False)
+
+        if role_status:
+            embed.add_field(name="🎭 Discord-роли", value=role_status[:1024], inline=False)
+        if minecraft_status:
+            embed.add_field(name="⛏️ Minecraft / LuckPerms", value=minecraft_status[:1024], inline=False)
+
         embed.add_field(
             name="ℹ️ Информация",
-            value="Благодарим вас за сотрудничество и вклад в развитие проекта! Желаем удачи!",
+            value="Снятие касается должностных полномочий. Донатные роли и группы не должны затрагиваться.",
             inline=False,
         )
-        embed.set_footer(text="WeriGrief Staff System • Личное уведомление")
+        embed.set_footer(text="WeriTime Staff System • Личное уведомление")
 
         try:
             await member.send(embed=embed)
-            log.info(f"✅ Sent dismissal DM to {member} ({nick})")
+            log.info("Sent dismissal DM to %s (%s)", member, nick)
             return True
         except discord.errors.Forbidden:
-            log.warning(f"⚠️ Could not send dismissal DM to {member} ({nick}): user has direct messages closed")
+            log.warning("Could not send dismissal DM to %s: direct messages are closed", member)
             return False
-        except Exception as e:
-            log.warning(f"Error sending dismissal DM to {member} ({nick}): {e}")
+        except Exception:
+            log.exception("Error sending dismissal DM to %s (%s)", member, nick)
             return False
 

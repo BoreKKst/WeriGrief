@@ -1,0 +1,2 @@
+login-timeout-seconds: 90
+captcha-enabled: true

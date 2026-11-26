@@ -29,6 +29,26 @@ def _ensure_postgres_running():
     if not os.path.isfile(pg_ctl):
         raise RuntimeError(f"pg_ctl не найден: {pg_ctl}")
 
+    if not os.path.isfile(pg_isready):
+        raise RuntimeError(f"pg_isready не найден: {pg_isready}")
+
+    # pg_ctl refuses even a status check when the bot runs as root. Check the
+    # TCP endpoint first so an already-running Termux PostgreSQL works as-is.
+    ready = subprocess.run(
+        [pg_isready, "-h", "127.0.0.1", "-p", "5432"],
+        capture_output=True,
+        text=True,
+    )
+    if ready.returncode == 0:
+        return
+
+    if os.geteuid() == 0:
+        raise RuntimeError(
+            "PostgreSQL не запущен, а бот запущен от root. Запусти PostgreSQL "
+            "от владельца кластера (в Termux: pg_ctl -D $PREFIX/var/lib/postgresql "
+            "-l $PREFIX/var/lib/postgresql/server.log start), затем перезапусти бота."
+        )
+
     status = subprocess.run(
         [pg_ctl, "-D", pgdata, "status"],
         capture_output=True,
@@ -53,9 +73,6 @@ def _ensure_postgres_running():
                     "Не удалось запустить PostgreSQL: "
                     + (result.stderr or result.stdout)
                 )
-
-    if not os.path.isfile(pg_isready):
-        raise RuntimeError(f"pg_isready не найден: {pg_isready}")
 
     for _ in range(30):
         ready = subprocess.run(

@@ -1,5 +1,5 @@
 """
-Google Sheets Monitor for WeriGrief Staff Bot.
+Google Sheets Monitor for WeriTime Staff Bot.
 Monitors:
 1. "Учет предупреждений" - addition, removal, and monthly reset of warnings.
 2. "Списки" - staff appointments, promotions, and removals ("админ пока").
@@ -17,7 +17,7 @@ from pathlib import Path
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-log = logging.getLogger("werigrief_staff.sheets")
+log = logging.getLogger("weritime_staff.sheets")
 
 # Full read/write scope for spreadsheets and Drive read scope for modifier detection
 SCOPES = [
@@ -100,6 +100,7 @@ class SheetsMonitor:
         self.last_reset_month: str = ""  # YYYY-MM of the last monthly reset
         self.last_playtime_date: str = ""  # YYYY-MM-DD of the last daily playtime check
         self.custom_exempt_staff: list[str] = []  # nicks exempt from norm by admin command
+        self.custom_required_staff: list[str] = []  # nicks forced to complete daily norm
         self.mc_playtime_snapshots: dict[str, dict] = {}  # { nick_low: { "hours": float, "date": str, "timestamp": float } }
         self.vacations: dict[str, dict] = {}
         self._state_file = Path(__file__).resolve().parent / "sheets_state.json"
@@ -116,6 +117,10 @@ class SheetsMonitor:
 
         # Load persisted state
         self._load_state()
+        try:
+            self._load_vacations_from_sheet()
+        except Exception as e:
+            log.warning("Could not read the vacation register from Google Sheets: %s", e)
 
         # If last_reset_month is unset, set to current month so we don't clear on first boot
         current_month = datetime.now(timezone.utc).strftime("%Y-%m")
@@ -175,6 +180,8 @@ class SheetsMonitor:
                     self.dismissed_history = data.get("dismissed_history", [])
                 if "custom_exempt_staff" in data:
                     self.custom_exempt_staff = data.get("custom_exempt_staff", [])
+                if "custom_required_staff" in data:
+                    self.custom_required_staff = data.get("custom_required_staff", [])
                 if "mc_playtime_snapshots" in data:
                     self.mc_playtime_snapshots = data.get("mc_playtime_snapshots", {})
                 if "vacations" in data:
@@ -188,6 +195,7 @@ class SheetsMonitor:
                 self.last_reset_month = ""
                 self.last_playtime_date = ""
                 self.custom_exempt_staff = []
+                self.custom_required_staff = []
                 self.mc_playtime_snapshots = {}
                 self.vacations = {}
 
@@ -202,6 +210,7 @@ class SheetsMonitor:
                         "last_reset_month": self.last_reset_month,
                         "last_playtime_date": self.last_playtime_date,
                         "custom_exempt_staff": self.custom_exempt_staff,
+                        "custom_required_staff": self.custom_required_staff,
                         "mc_playtime_snapshots": self.mc_playtime_snapshots,
                         "vacations": self.vacations,
                     },
@@ -402,7 +411,7 @@ class SheetsMonitor:
                 old_copy["email"] = STAFF_EMAILS.get(nick_low, "")
 
                 # Automatically clear all warnings for dismissed staff from 'Учет предупреждений'!
-                warns_cleared = self.clear_player_warnings(old_copy["nick"])
+                warns_cleared = self.clear_player_warnings(old_copy["nick"], update_staff_count=False)
                 old_copy["warns_cleared"] = warns_cleared
 
                 # Identify who made the change
@@ -436,59 +445,130 @@ class SheetsMonitor:
 
     def remove_staff_member(self, target_nick: str, removed_by: str = "", reason: str = "") -> dict | None:
         """
-        Removes a staff member from 'Списки' sheet, clears their warnings from
-        'Учет предупреждений', records in audit history, and returns removed info.
+        Атомарно удаляет сотрудника и его предупреждения из Google Sheets.
+        Сохраняет историю снятия после успешного изменения таблиц.
         """
         try:
-            target_low = target_nick.strip().lower()
-            current_staff = self.get_staff_list()
+            target_key = target_nick.strip().replace("_", "").casefold()
+            if not target_key:
+                return None
 
+            current_staff = self.get_staff_list()
             target_entry = None
-            for s in current_staff:
-                if s.get("nick") and s["nick"].lower() == target_low:
-                    target_entry = s
+
+            for staff in current_staff:
+                staff_nick = str(staff.get("nick", "")).strip()
+                if staff_nick.replace("_", "").casefold() == target_key:
+                    target_entry = staff
                     break
 
             if not target_entry:
                 return None
 
-            actual_nick = target_entry["nick"]
+            actual_nick = str(target_entry["nick"]).strip()
+            actual_key = actual_nick.replace("_", "").casefold()
 
-            # Read all rows of 'Списки' to find row index
-            res = (
-                self.sheets.values()
-                .get(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f"'{STAFF_SHEET}'!A:A",
-                )
-                .execute()
-            )
-            rows = res.get("values", [])
-            row_idx = None
-            for idx, r in enumerate(rows, 1):
-                if r and resolve_email_to_nick(str(r[0]).strip()).lower() == target_low:
-                    row_idx = idx
+            warnings_history = []
+            for warning_row in self._fetch_warnings():
+                if not warning_row:
+                    continue
+                row_nick = str(warning_row[0] if len(warning_row) > 0 else "").strip()
+                if row_nick.replace("_", "").casefold() == actual_key:
+                    warnings_history.append({
+                        "nick": row_nick or actual_nick,
+                        "date": str(warning_row[1] if len(warning_row) > 1 else "—"),
+                        "reason": str(warning_row[2] if len(warning_row) > 2 else "Причина не указана"),
+                        "issued_by": str(warning_row[3] if len(warning_row) > 3 else "Неизвестно"),
+                    })
+
+            staff_result = self.sheets.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{STAFF_SHEET}'!A:A",
+            ).execute()
+
+            staff_rows = staff_result.get("values", [])
+            staff_row_number = None
+
+            for row_number, row in enumerate(staff_rows, 1):
+                if not row:
+                    continue
+                row_nick = resolve_email_to_nick(str(row[0]).strip())
+                if row_nick.replace("_", "").casefold() == actual_key:
+                    staff_row_number = row_number
                     break
 
-            if row_idx is not None:
-                body = {
-                    "requests": [
-                        {
-                            "deleteDimension": {
-                                "range": {
-                                    "sheetId": 0,
-                                    "dimension": "ROWS",
-                                    "startIndex": row_idx - 1,
-                                    "endIndex": row_idx,
-                                }
-                            }
-                        }
-                    ]
-                }
-                self.sheets.batchUpdate(spreadsheetId=self.spreadsheet_id, body=body).execute()
-                log.info(f"Deleted row {row_idx} ({actual_nick}) from '{STAFF_SHEET}'")
+            if staff_row_number is None:
+                log.error("Dismissal aborted: staff row not found for %s", actual_nick)
+                return None
 
-            warns_cleared = self.clear_player_warnings(actual_nick)
+            warning_result = self.sheets.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{WARNINGS_SHEET}'!A:D",
+                valueRenderOption="FORMATTED_VALUE",
+            ).execute()
+
+            warning_rows = warning_result.get("values", [])
+            warning_row_numbers = []
+
+            for row_number, row in enumerate(warning_rows, 1):
+                if row_number == 1 and row:
+                    header = str(row[0]).strip().casefold()
+                    if header in ("игровой никнейм", "никнейм"):
+                        continue
+
+                row_nick = str(row[0] if row else "").strip()
+                if row_nick.replace("_", "").casefold() == actual_key:
+                    warning_row_numbers.append(row_number)
+
+            metadata = self.sheets.get(
+                spreadsheetId=self.spreadsheet_id,
+                fields="sheets(properties(sheetId,title))",
+            ).execute()
+
+            sheet_ids = {
+                item["properties"]["title"]: item["properties"]["sheetId"]
+                for item in metadata.get("sheets", [])
+            }
+
+            if STAFF_SHEET not in sheet_ids or WARNINGS_SHEET not in sheet_ids:
+                log.error("Dismissal aborted: required sheet IDs were not found")
+                return None
+
+            requests = []
+
+            for row_number in sorted(warning_row_numbers, reverse=True):
+                requests.append({
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": sheet_ids[WARNINGS_SHEET],
+                            "dimension": "ROWS",
+                            "startIndex": row_number - 1,
+                            "endIndex": row_number,
+                        }
+                    }
+                })
+
+            requests.append({
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_ids[STAFF_SHEET],
+                        "dimension": "ROWS",
+                        "startIndex": staff_row_number - 1,
+                        "endIndex": staff_row_number,
+                    }
+                }
+            })
+
+            self.sheets.batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"requests": requests},
+            ).execute()
+
+            log.info(
+                "Atomically deleted staff member %s and %s warning rows",
+                actual_nick,
+                len(warning_row_numbers),
+            )
 
             dismiss_entry = {
                 "nick": actual_nick,
@@ -498,17 +578,31 @@ class SheetsMonitor:
                 "removed_by": resolve_email_to_nick(removed_by) if removed_by else "Руководство проекта",
                 "reason": reason,
                 "dismissed_at": datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC"),
-                "warns_cleared": warns_cleared,
+                "warns_cleared": len(warning_row_numbers),
+                "warnings_history": warnings_history,
             }
+
             self.dismissed_history.append(dismiss_entry)
+            self.known_staff.pop(actual_nick.lower(), None)
 
-            if target_low in self.known_staff:
-                del self.known_staff[target_low]
+            if hasattr(self, "known_warnings"):
+                if isinstance(self.known_warnings, dict):
+                    self.known_warnings = {
+                        key: value
+                        for key, value in self.known_warnings.items()
+                        if str(key).split("|", 1)[0].replace("_", "").casefold() != actual_key
+                    }
+                else:
+                    self.known_warnings = [
+                        key for key in self.known_warnings
+                        if str(key).split("|", 1)[0].replace("_", "").casefold() != actual_key
+                    ]
+
             self._save_state()
-
             return dismiss_entry
+
         except Exception as e:
-            log.error(f"Error removing staff member {target_nick}: {e}")
+            log.exception("Error removing staff member %s: %s", target_nick, e)
             return None
 
     def add_staff_member(
@@ -543,12 +637,13 @@ class SheetsMonitor:
                 telegram.strip(),
                 "0",  # played hours
                 "0",  # warnings
+                datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d"),  # appointment date
             ]
 
             body = {"values": [row_data]}
             self.sheets.values().append(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{STAFF_SHEET}'!A:F",
+                range=f"'{STAFF_SHEET}'!A:G",
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
                 body=body,
@@ -563,6 +658,7 @@ class SheetsMonitor:
                 "invited": "0",
                 "hours": "0",
                 "warns": "0",
+                "appointed_at": datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d"),
                 "email": STAFF_EMAILS.get(target_low, ""),
                 "appointed_by": resolve_email_to_nick(appointed_by) if appointed_by else "Руководство проекта",
             }
@@ -573,7 +669,6 @@ class SheetsMonitor:
         except Exception as e:
             log.error(f"Failed to add staff member {nick}: {e}")
             return None
-
     def clean_former_staff_warnings(self) -> dict:
         """
         Scans 'Учет предупреждений' and purges any warnings belonging to
@@ -649,7 +744,7 @@ class SheetsMonitor:
             log.error(f"Failed to reset monthly warnings: {e}")
             return False
 
-    def clear_player_warnings(self, target_nick: str) -> int:
+    def clear_player_warnings(self, target_nick: str, update_staff_count: bool = True) -> int | None:
         """
         Removes all warning rows for a specific player from 'Учет предупреждений'
         and updates their warn count in 'Списки'.
@@ -669,29 +764,33 @@ class SheetsMonitor:
             )
             values = res.get("values", [])
             if not values:
+                if update_staff_count and not self._update_staff_warning_count(target_nick, 0):
+                    return None
                 return 0
 
             header = values[0]
             data_rows = values[1:]
 
-            target_no_us = target_low.replace("_", "")
+            target_no_us = target_low.replace("_", "").casefold()
             kept_rows = []
             removed_count = 0
+
             for r in data_rows:
-                if not r or len(r) == 0 or not _is_complete_warn_row(r):
+                if not r:
                     continue
-                r_nick = str(r[0]).strip().lower()
-                if r_nick == target_low or r_nick.replace("_", "") == target_no_us:
+
+                r_nick = str(r[0]).strip() if len(r) > 0 else ""
+                r_key = r_nick.replace("_", "").casefold()
+
+                if r_key == target_no_us:
                     removed_count += 1
                 else:
-                    kept_rows.append([
-                        str(r[0]).strip(),
-                        normalize_date_str(r[1]) if len(r) > 1 else "",
-                        str(r[2]).strip() if len(r) > 2 else "",
-                        str(r[3]).strip() if len(r) > 3 else "",
-                    ])
+                    # Сохраняем даже неполные записи других сотрудников.
+                    kept_rows.append([str(cell) for cell in r])
 
             if removed_count == 0:
+                if update_staff_count and not self._update_staff_warning_count(target_nick, 0):
+                    return None
                 return 0
 
             # Clear existing data rows
@@ -713,12 +812,13 @@ class SheetsMonitor:
             self.known_warnings = [self._row_key(r) for r in kept_rows if _is_complete_warn_row(r)]
             self._save_state()
 
-            self._update_staff_warning_count(target_nick, 0)
+            if update_staff_count and not self._update_staff_warning_count(target_nick, 0):
+                return None
             log.info(f"Cleared {removed_count} warning(s) for player {target_nick}")
             return removed_count
         except Exception as e:
             log.error(f"Error clearing warnings for {target_nick}: {e}")
-            return 0
+            return None
 
     def remove_warning(
         self,
@@ -883,47 +983,65 @@ class SheetsMonitor:
             log.error(f"Failed to increment staff hours in sheets: {e}")
             return {}
 
-    def set_norm_exempt(self, nick: str, is_exempt: bool) -> bool:
-        """Adds or removes nick from custom_exempt_staff with canonical resolution."""
+    def _canonical_norm_nick(self, nick: str) -> str:
         nick_low = nick.strip().lower()
-        canonical_nick = nick_low
-        try:
-            for s in self.get_staff_list():
-                s_nick = (s.get("nick") or "").strip().lower()
-                if s_nick == nick_low or s_nick.replace("_", "") == nick_low.replace("_", ""):
-                    canonical_nick = s_nick
-                    break
-        except Exception:
-            pass
+        target_no_us = nick_low.replace("_", "")
+        for staff in self.get_staff_list():
+            staff_nick = (staff.get("nick") or "").strip().lower()
+            if staff_nick == nick_low or staff_nick.replace("_", "") == target_no_us:
+                return staff_nick
+        return nick_low
 
-        changed = False
-        target_no_us = canonical_nick.replace("_", "")
+    def set_norm_exempt(self, nick: str, is_exempt: bool) -> bool:
+        """Переключает ручное освобождение/обязательную норму."""
+        canonical = self._canonical_norm_nick(nick)
+        target = canonical.replace("_", "")
+        before = (list(self.custom_exempt_staff), list(self.custom_required_staff))
+
+        self.custom_exempt_staff = [
+            x for x in self.custom_exempt_staff
+            if x.strip().lower() != canonical
+            and x.strip().lower().replace("_", "") != target
+        ]
+        self.custom_required_staff = [
+            x for x in self.custom_required_staff
+            if x.strip().lower() != canonical
+            and x.strip().lower().replace("_", "") != target
+        ]
+
         if is_exempt:
-            already = any(e.lower() == canonical_nick or e.lower().replace("_", "") == target_no_us for e in self.custom_exempt_staff)
-            if not already:
-                self.custom_exempt_staff.append(canonical_nick)
-                changed = True
+            self.custom_exempt_staff.append(canonical)
         else:
-            to_remove = [e for e in self.custom_exempt_staff if e.lower() == canonical_nick or e.lower().replace("_", "") == target_no_us]
-            if to_remove:
-                for r in to_remove:
-                    self.custom_exempt_staff.remove(r)
-                changed = True
+            self.custom_required_staff.append(canonical)
+
+        changed = before != (
+            self.custom_exempt_staff, self.custom_required_staff
+        )
         if changed:
             self._save_state()
-            log.info(f"Updated custom norm exemption for {canonical_nick}: exempt={is_exempt}")
+            log.info(
+                "Updated norm setting for %s: exempt=%s",
+                canonical, is_exempt
+            )
         return changed
 
     def is_custom_exempt(self, nick: str) -> bool:
         if not nick:
             return False
-        target = nick.strip().lower()
-        target_no_us = target.replace("_", "")
-        for ex in self.custom_exempt_staff:
-            ex_low = ex.strip().lower()
-            if target == ex_low or target_no_us == ex_low.replace("_", ""):
-                return True
-        return False
+        target = nick.strip().lower().replace("_", "")
+        return any(
+            target == entry.strip().lower().replace("_", "")
+            for entry in self.custom_exempt_staff
+        )
+
+    def is_custom_required(self, nick: str) -> bool:
+        if not nick:
+            return False
+        target = nick.strip().lower().replace("_", "")
+        return any(
+            target == entry.strip().lower().replace("_", "")
+            for entry in self.custom_required_staff
+        )
 
     def update_multiple_staff_hours(self, hours_map: dict[str, str]) -> int:
         """
@@ -987,6 +1105,75 @@ class SheetsMonitor:
         except Exception as exc:
             log.error("Failed to synchronize warning count for %s: %s", nick, exc)
             return False
+
+    def add_warning_once(
+        self, nick: str, date: str, reason: str, issuer: str
+    ) -> tuple[int, bool, bool]:
+        """Гарантирует одно автоматическое предупреждение на игрока за день."""
+        try:
+            norm_date = normalize_date_str(date)
+            nick_key = nick.strip().casefold()
+            issuer_key = issuer.strip().casefold()
+
+            def is_same_automatic_warning(row):
+                return (
+                    _is_complete_warn_row(row)
+                    and str(row[0]).strip().casefold() == nick_key
+                    and normalize_date_str(str(row[1])) == norm_date
+                    and str(row[3]).strip().casefold() == issuer_key
+                )
+
+            rows = self._fetch_warnings()
+            existing_row = next(
+                (row for row in rows if is_same_automatic_warning(row)),
+                None,
+            )
+            created = existing_row is None
+
+            if created:
+                self.add_warning(nick, norm_date, reason, issuer)
+                rows = self._fetch_warnings()
+                existing_row = next(
+                    (row for row in rows if is_same_automatic_warning(row)),
+                    None,
+                )
+
+                if existing_row is None:
+                    log.error(
+                        "Automatic warning was not confirmed in Sheets: %s %s",
+                        nick, norm_date,
+                    )
+                    return 0, False, False
+
+            # Синхронизируем локальный список, чтобы повторно не обработать
+            # уже существующую строку при следующем опросе таблицы.
+            known_key = self._row_key(existing_row)
+            if known_key not in self.known_warnings:
+                self.known_warnings.append(known_key)
+                self._save_state()
+
+            total = sum(
+                1 for row in rows
+                if _is_complete_warn_row(row)
+                and str(row[0]).strip().casefold() == nick_key
+            )
+
+            synced = self._update_staff_warning_count(nick, total)
+            if synced is False:
+                log.error(
+                    "Could not synchronize warning count for %s",
+                    nick,
+                )
+                return total, created, False
+
+            return total, created, True
+
+        except Exception:
+            log.exception(
+                "Failed to ensure automatic warning for %s on %s",
+                nick, date,
+            )
+            return 0, False, False
 
     def add_warning(self, nick: str, date: str, reason: str, issuer: str) -> int:
         """
@@ -1150,6 +1337,78 @@ class SheetsMonitor:
             log.error(f"Failed to update staff position for {target_nick}: {e}")
             return None
 
+    def _load_vacations_from_sheet(self):
+        """Loads vacation entries from the dedicated Google Sheets tab when present."""
+        metadata = self.sheets.get(spreadsheetId=self.spreadsheet_id).execute()
+        if not any(item.get("properties", {}).get("title") == "Отпуска WeriTime"
+                   for item in metadata.get("sheets", [])):
+            return
+        result = self.sheets.values().get(
+            spreadsheetId=self.spreadsheet_id,
+            range="'Отпуска WeriTime'!A:E",
+        ).execute()
+        vacations = {}
+        for row in result.get("values", [])[1:]:
+            if len(row) < 3 or not str(row[0]).strip():
+                continue
+            nick = str(row[0]).strip()
+            try:
+                def parse_sheet_date(raw):
+                    try:
+                        return datetime.fromisoformat(str(raw).strip()).date().isoformat()
+                    except ValueError:
+                        normalized = normalize_date_str(raw)
+                        return datetime.strptime(normalized, "%d.%m.%Y").date().isoformat()
+
+                entry = {
+                    "start": parse_sheet_date(row[1]),
+                    "end": parse_sheet_date(row[2]),
+                    "days": int(row[3]) if len(row) > 3 and str(row[3]).strip() else 0,
+                    "created_at": str(row[4]).strip() if len(row) > 4 else "",
+                }
+            except (ValueError, TypeError):
+                continue
+            vacations[nick.lower()] = entry
+        if vacations:
+            self.vacations.update(vacations)
+
+    def _sync_vacations_to_sheet(self):
+        """Creates/updates the WeriTime vacation tab without changing other tabs."""
+        metadata = self.sheets.get(spreadsheetId=self.spreadsheet_id).execute()
+        sheet_id = next((
+            item.get("properties", {}).get("sheetId")
+            for item in metadata.get("sheets", [])
+            if item.get("properties", {}).get("title") == "Отпуска WeriTime"
+        ), None)
+        if sheet_id is None:
+            response = self.sheets.batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": "Отпуска WeriTime"}}}]},
+            ).execute()
+            sheet_id = response["replies"][0]["addSheet"]["properties"]["sheetId"]
+        rows = [["Minecraft-ник", "Начало", "Окончание", "Дней", "Оформлено"]]
+        for nick, entry in sorted(self.vacations.items()):
+            rows.append([
+                nick,
+                entry.get("start", ""),
+                entry.get("end", ""),
+                entry.get("days", ""),
+                entry.get("created_at", ""),
+            ])
+        sheet_range = "'Отпуска WeriTime'!A:E"
+        self.sheets.values().clear(
+            spreadsheetId=self.spreadsheet_id,
+            range=sheet_range,
+            body={},
+        ).execute()
+        self.sheets.values().update(
+            spreadsheetId=self.spreadsheet_id,
+            range="'Отпуска WeriTime'!A1",
+            valueInputOption="RAW",
+            body={"values": rows},
+        ).execute()
+        log.info("Synced %s vacation entries to Google Sheets", len(rows) - 1)
+
     def create_vacation(self, nick: str, days: int) -> dict:
         """Отпуск на 1–15 дней; повторный отпуск доступен через 13 дней после окончания."""
         from datetime import date, timedelta
@@ -1173,7 +1432,16 @@ class SheetsMonitor:
         end_date = today + timedelta(days=int(days) - 1)
         entry = {"start": today.isoformat(), "end": end_date.isoformat(),
                  "days": int(days), "created_at": datetime.now(timezone.utc).isoformat()}
+        previous = self.vacations.get(key)
         self.vacations[key] = entry
+        try:
+            self._sync_vacations_to_sheet()
+        except Exception as exc:
+            if previous is None:
+                self.vacations.pop(key, None)
+            else:
+                self.vacations[key] = previous
+            raise RuntimeError("Не удалось сохранить отпуск в Google Sheets. Изменения отменены.") from exc
         self._save_state()
         return entry
 
@@ -1188,6 +1456,20 @@ class SheetsMonitor:
 
     def get_vacation(self, nick: str) -> dict | None:
         return self.vacations.get(nick.strip().lower())
+
+    def clear_vacation(self, nick: str) -> bool:
+        """Удаляет отпуск сотрудника из сохранённого состояния."""
+        key = nick.strip().lower()
+        if key not in self.vacations:
+            return False
+        previous = self.vacations.pop(key)
+        try:
+            self._sync_vacations_to_sheet()
+        except Exception as exc:
+            self.vacations[key] = previous
+            raise RuntimeError("Не удалось обновить Google Sheets. Отпуск оставлен без изменений.") from exc
+        self._save_state()
+        return True
 
     def update_staff_discord_username(self, target_nick: str, username: str) -> bool:
         """Write current Discord username (not numeric ID) into column C."""
@@ -1223,7 +1505,7 @@ class SheetsMonitor:
             self.sheets.values()
             .get(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{STAFF_SHEET}'!A:F",
+                range=f"'{STAFF_SHEET}'!A:G",
             )
             .execute()
         )
@@ -1253,6 +1535,7 @@ class SheetsMonitor:
                     "telegram": str(row[3]).strip() if len(row) > 3 else "",
                     "hours": str(row[4]).strip() if len(row) > 4 else "0",
                     "warns": str(row[5]).strip() if len(row) > 5 else "0",
+                    "appointed_at": str(row[6]).strip() if len(row) > 6 else "",
                     "email": email,
                 }
                 staff.append(entry)

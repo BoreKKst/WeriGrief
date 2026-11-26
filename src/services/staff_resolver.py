@@ -268,7 +268,7 @@ class StaffResolver:
 
     def is_leadership(self, member: discord.Member, guild: discord.Guild = None) -> bool:
         """
-        Проверяет, является ли пользователь Руководством (Владелец, Со-владелец, Куратор).
+        Проверяет, является ли пользователь Руководством (Creator, Owners, Куратор).
         ТРЕБОВАНИЕ: обязательное наличие записи в Google Sheets с соответствующей должностью или в LEADERSHIP_IDS.
         """
         if not isinstance(member, (discord.Member, discord.User)):
@@ -285,7 +285,7 @@ class StaffResolver:
 
     def is_admin_or_higher(self, member: discord.Member, guild: discord.Guild = None) -> bool:
         """
-        Проверяет, является ли пользователь Администратором (Старший, Обычный, Куратор, Владелец).
+        Проверяет, является ли пользователь Администратором (Старший, Обычный, Куратор, Creator).
         ТРЕБОВАНИЕ: обязательное наличие записи в Google Sheets или в LEADERSHIP_IDS.
         """
         if not isinstance(member, (discord.Member, discord.User)):

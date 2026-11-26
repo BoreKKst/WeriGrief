@@ -11,6 +11,7 @@ from src.core.config import log, GUILD_ID, WARN_NOTIFY_CHANNEL, ADMIN_KEYWORDS, 
 from src.utils.embeds import EmbedBuilder
 from src.services.permissions import MinecraftPermissionsManager
 from src.services.sheets_api import normalize_date_str
+from src.services.auto_dismissal import auto_dismiss_staff
 
 
 class WarningsCog(commands.Cog, name="Warnings"):
@@ -91,28 +92,15 @@ class WarningsCog(commands.Cog, name="Warnings"):
             mc_nick, reason, total_warns, source="Нарушения"
         )
 
-        role_assigned = False
-        if total_warns >= 3 and member:
-            warn_role = discord.utils.get(guild.roles, name="⚠️ На испытании")
-            if not warn_role:
-                try:
-                    warn_role = await guild.create_role(
-                        name="⚠️ На испытании",
-                        color=discord.Color.red(),
-                        reason="Auto-created by WeriGrief Staff System",
-                    )
-                except Exception as e:
-                    log.error(f"Failed to create role: {e}")
-            if warn_role and warn_role not in member.roles:
-                try:
-                    await member.add_roles(warn_role, reason=f"Набрал {total_warns} предупреждений")
-                    role_assigned = True
-                except Exception as e:
-                    log.error(f"Failed to assign role to {member}: {e}")
+        auto_dismissed = False
+        if total_warns >= 3:
+            auto_dismissed = await auto_dismiss_staff(
+                self.bot, self.sheets_monitor, self.staff_resolver, guild, mc_nick
+            )
 
         resp_desc = f"Предупреждение сотруднику `{mc_nick}` успешно занесено в таблицу!\n**Всего предупреждений:** {total_warns}"
-        if role_assigned:
-            resp_desc += "\n🚨 Назначена роль `⚠️ На испытании`."
+        if auto_dismissed:
+            resp_desc += "\n\n🚫 Сотрудник автоматически снят с должности после третьего предупреждения."
         resp_desc += "\n🎮 Команда личного уведомления отправлена в Minecraft (игрок должен быть онлайн)." if mc_notified else "\n⚠️ Не удалось отправить команду уведомления в Minecraft — проверьте Pterodactyl API и доступность сервера."
 
         await ctx.send(f"✅ {resp_desc}")
@@ -201,7 +189,7 @@ class WarningsCog(commands.Cog, name="Warnings"):
         embed.add_field(name="📋 Причина снятого варна", value=removed_info['reason'], inline=False)
         if role_removed:
             embed.add_field(name="🎉 Роль испытательного срока", value="Снята с сотрудника (варнов менее 3)", inline=False)
-        embed.set_footer(text=f"Снял: {ctx.author} • WeriGrief Staff System")
+        embed.set_footer(text=f"Снял: {ctx.author} • WeriTime Staff System")
 
         ping_text = f"{member.mention} " if member else ""
         if warn_channel:
@@ -275,7 +263,7 @@ class WarningsCog(commands.Cog, name="Warnings"):
                 description=desc,
                 timestamp=datetime.now(timezone.utc),
             )
-            embed.set_footer(text="WeriGrief Staff System")
+            embed.set_footer(text="WeriTime Staff System")
             await ctx.send(embed=embed)
             return
 
@@ -304,7 +292,7 @@ class WarningsCog(commands.Cog, name="Warnings"):
                 inline=False,
             )
 
-        embed.set_footer(text="WeriGrief Staff System • Префикс: !warns / Слэш: /warns")
+        embed.set_footer(text="WeriTime Staff System • Префикс: !warns / Слэш: /warns")
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(
@@ -346,6 +334,12 @@ class WarningsCog(commands.Cog, name="Warnings"):
 
         mc_nick, member = self.staff_resolver.resolve_query_to_target(guild, target)
         removed = self.sheets_monitor.clear_player_warnings(mc_nick)
+        if removed is None:
+            await ctx.send(
+                "❌ Не удалось очистить предупреждения: ошибка Google Sheets. Попробуйте позже.",
+                ephemeral=True,
+            )
+            return
         if removed == 0:
             await ctx.send(f"ℹ️ У игрока `{mc_nick}` не найдено предупреждений в таблице для снятия.")
             return
@@ -373,6 +367,6 @@ class WarningsCog(commands.Cog, name="Warnings"):
         if role_removed:
             embed.add_field(name="🎉 Роль испытательного срока", value="Снята с сотрудника", inline=False)
 
-        embed.set_footer(text="WeriGrief Staff System • Google Sheets Sync")
+        embed.set_footer(text="WeriTime Staff System • Google Sheets Sync")
         await ctx.send(embed=embed)
 

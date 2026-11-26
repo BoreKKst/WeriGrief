@@ -17,6 +17,7 @@ from src.core.config import (
 )
 from src.utils.embeds import EmbedBuilder
 from src.services.permissions import StaffRoleManager, MinecraftPermissionsManager
+from src.services.auto_dismissal import auto_dismiss_staff
 from src.services.sheets_api import STAFF_EMAILS
 
 
@@ -206,24 +207,12 @@ class SheetsSyncTask:
             if warn_channel:
                 await warn_channel.send(content=ping_text, embed=embed)
 
-            if total_warns >= 3 and member:
-                warn_role = discord.utils.get(guild.roles, name="⚠️ На испытании")
-                if not warn_role:
-                    try:
-                        warn_role = await guild.create_role(
-                            name="⚠️ На испытании",
-                            color=discord.Color.red(),
-                            reason="Auto-created by WeriGrief Staff System",
-                        )
-                    except Exception as e:
-                        log.error(f"Failed to create role: {e}")
-
-                if warn_role and warn_role not in member.roles:
-                    try:
-                        await member.add_roles(warn_role, reason=f"Набрал {total_warns} предупреждений")
-                        log.info(f"Assigned '⚠️ На испытании' to {member}")
-                    except Exception as e:
-                        log.error(f"Failed to assign role to {member}: {e}")
+            if total_warns >= 3:
+                await auto_dismiss_staff(
+                    self.bot, self.sheets_monitor,
+                    self.staff_resolver, guild, nick,
+                    reason="Автоматическое снятие: в таблице зарегистрировано третье предупреждение",
+                )
 
         removed_by_player = warn_data.get("removed_by_player", {})
         for p_nick, p_info in removed_by_player.items():

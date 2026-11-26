@@ -8,10 +8,11 @@ import json
 import aiohttp
 import discord
 from src.core.config import (
-    log, PTERO_API_KEY, PTERO_BASE_URL, PTERO_SERVER_IDS, ROLE_IDS
+    log, PTERO_API_KEY, PTERO_BASE_URL, PTERO_SERVER_IDS, ROLE_IDS,
+    STAFF_ROLE_SPECS,
 )
 
-# Роли персонала WeriGrief. Project Team — только Discord, без группы LuckPerms.
+# Роли персонала WeriTime. Project Team — базовая Discord-роль без группы LuckPerms.
 ROLE_CREATOR = ROLE_IDS["creator"]
 ROLE_GL_OWNER = ROLE_IDS["gl_owner"]
 ROLE_OWNER = ROLE_IDS["owner"]
@@ -43,7 +44,7 @@ STAFF_ROLE_KEYWORDS = (
 BASE_STAFF_ROLE_ID = ROLE_PROJECT_TEAM
 
 POSITION_DISCORD_ROLES_MAP = {
-    "creator": ROLE_CREATOR, "devolper": ROLE_CREATOR, "developer": ROLE_CREATOR,
+    "creator": ROLE_OWNER, "devolper": ROLE_OWNER, "developer": ROLE_OWNER,
     "gl.owner": ROLE_GL_OWNER, "gl owner": ROLE_GL_OWNER, "gowner": ROLE_GL_OWNER,
     "owner": ROLE_OWNER,
     "gl.curator": ROLE_GL_CURATOR, "gl curator": ROLE_GL_CURATOR, "gcurator": ROLE_GL_CURATOR, "g.curator": ROLE_GL_CURATOR, "g curator": ROLE_GL_CURATOR,
@@ -60,51 +61,223 @@ POSITION_DISCORD_ROLES_MAP = {
     "project team": ROLE_PROJECT_TEAM,
 }
 
-# Группы LuckPerms: madmin и mladmin существуют только в Minecraft.
+# Точные группы LuckPerms, названия которых пользователь подтвердил для Minecraft.
 ALL_LP_GROUPS = {
-    "devolper", "gowner", "owner", "gcurator", "curator", "zcurator",
-    "gadmin", "admin", "madmin", "glmoder", "stmoder", "moder",
-    "mlmoder", "mladmin", "helper", "default",
+    "owner", "zamowner", "techadmin", "admin", "gladmin", "mladmin",
+    "kyrva", "zamkyrva", "glmoder", "moder", "mlmoder",
 }
 
 POSITION_LUCKPERMS_MAP = {
-    "creator": "devolper", "devolper": "devolper", "developer": "devolper",
-    "разработчик": "devolper", "гл.разработчик": "devolper",
-    "gl.owner": "gowner", "gl owner": "gowner", "gowner": "gowner",
+    # Старые должности разработчика используют Minecraft-группу techadmin.
+    "creator": "techadmin",
+    "developer": "techadmin",
+    "devolper": "techadmin",
+    "разработчик": "techadmin",
+    "гл.разработчик": "techadmin",
+
+    "gl.owner": "zamowner",
+    "gl owner": "zamowner",
+    "gowner": "zamowner",
+    "glowner": "zamowner",
+    "со-владелец": "zamowner",
     "owner": "owner",
-    "gl.curator": "gcurator", "gl curator": "gcurator", "gcurator": "gcurator", "g.curator": "gcurator", "g curator": "gcurator",
-    "curator": "curator",
-    "z.curator": "zcurator", "z curator": "zcurator", "zcurator": "zcurator",
-    "gl.admin": "gadmin", "gl admin": "gadmin", "gadmin": "gadmin",
+    "владелец": "owner",
+
+    # В Minecraft нет отдельной группы для Гл.Куратора.
+    "curator": "kyrva",
+    "куратор": "kyrva",
+    "z.curator": "zamkyrva",
+    "z curator": "zamkyrva",
+    "zcurator": "zamkyrva",
+    "зам.куратор": "zamkyrva",
+    "зам куратор": "zamkyrva",
+
+    "gl.admin": "gladmin",
+    "gl admin": "gladmin",
+    "gadmin": "gladmin",
+    "гл.админ": "gladmin",
     "admin": "admin",
-    "gl.moder": "glmoder", "gl moder": "glmoder", "glmoder": "glmoder",
-    "st.moder": "stmoder", "st moder": "stmoder", "stmoder": "stmoder",
+    "админ": "admin",
+    "ml.admin": "mladmin",
+    "ml admin": "mladmin",
+    "mladmin": "mladmin",
+    "мл.админ": "mladmin",
+
+    "gl.moder": "glmoder",
+    "gl moder": "glmoder",
+    "glmoder": "glmoder",
+    "гл.модер": "glmoder",
     "moder": "moder",
-    "ml.moder": "mlmoder", "ml moder": "mlmoder", "mlmoder": "mlmoder", "ml admin": "mladmin", "mladmin": "mladmin",
-    "helper": "helper", "хелпер": "helper",
-    # Project Team — Discord-only, не выдаём Minecraft-группу.
+    "модер": "moder",
+    "ml.moder": "mlmoder",
+    "ml moder": "mlmoder",
+    "mlmoder": "mlmoder",
+    "мл.модер": "mlmoder",
 }
 
 
 
 
-# Порядок должностей для /promote и /demote — от младшей к старшей.
-# ML ADMIN имеет отдельную Discord-роль WeriGrief.
+# Порядок для повышения и понижения — от младшей должности к старшей.
 POSITION_ORDER = [
-    "HELPER", "D.HELPER", "ML.MODER", "MODER", "ST.MODER", "GL.MODER", "D.MODER",
-    "ML.ADMIN", "ADMIN", "GL.ADMIN", "D.ADMIN", "Z.CURATOR", "CURATOR",
-    "GL.CURATOR", "OWNER", "D.OWNER", "GL.OWNER", "CREATOR",
-    "Разработчик", "Гл.Разработчик", "PR Manager",
-    "Сотрудник проекта", "На испытании", "Кандидат",
+    "Сотрудник проекта", "HELPER", "ML.MODER", "MODER", "GL.MODER",
+    "ML.ADMIN", "ADMIN", "GL.ADMIN", "Z.CURATOR", "CURATOR",
+    "GL.CURATOR", "GL.OWNER", "OWNER",
 ]
+
+POSITION_CHOICES = [
+    ("Сотрудник проекта", "Сотрудник проекта"),
+    ("Стажер", "HELPER"),
+    ("Мл.Модер", "ML.MODER"),
+    ("Модер", "MODER"),
+    ("Гл.Модер", "GL.MODER"),
+    ("Мл.Админ", "ML.ADMIN"),
+    ("Админ", "ADMIN"),
+    ("Гл.Админ", "GL.ADMIN"),
+    ("Зам.Куратор", "Z.CURATOR"),
+    ("Куратор", "CURATOR"),
+    ("Гл.Куратор", "GL.CURATOR"),
+    ("Со-Владелец", "GL.OWNER"),
+    ("Владелец", "OWNER"),
+]
+
+POSITION_RANK_ALIASES = {
+    "CREATOR": "OWNER", "DEVELOPER": "OWNER", "D.OWNER": "GL.OWNER",
+    "GCURATOR": "GL.CURATOR", "G.CURATOR": "GL.CURATOR",
+    "D.ADMIN": "ADMIN", "D.MODER": "MODER", "ST.MODER": "MODER",
+    "D.HELPER": "HELPER", "PR MANAGER": "Сотрудник проекта",
+    "НА ИСПЫТАНИИ": "HELPER", "КАНДИДАТ": "Сотрудник проекта",
+}
+
+
+def normalize_position_for_order(position: str) -> str:
+    normalized = position.strip().upper()
+    return POSITION_RANK_ALIASES.get(normalized, normalized)
 
 class StaffRoleManager:
     """Класс управления ролями персонала в Discord."""
 
     @staticmethod
+    async def ensure_staff_roles(guild: discord.Guild) -> None:
+        """Create missing WeriTime roles and keep their names, colors and order in sync."""
+        old_names = {
+            "owner": ("OWNER", "Владелец"), "gl_owner": ("GL.OWNER", "D.OWNER", "Со-Владелец"),
+            "gl_curator": ("GL.CURATOR", "Гл.Куратор"), "curator": ("CURATOR", "Куратор"),
+            "z_curator": ("Z.CURATOR", "Зам.Куратор"), "gl_admin": ("GL.ADMIN", "Гл.Админ"),
+            "admin": ("ADMIN", "Админ"), "ml_admin": ("ML.ADMIN", "Мл.Админ"),
+            "gl_moder": ("GL.MODER", "Гл.Модер"), "moder": ("MODER", "Модер"),
+            "ml_moder": ("ML.MODER", "Мл.Модер"), "helper": ("HELPER", "D.HELPER", "Стажер"),
+            "project_team": ("PROJECT TEAM", "Сотрудник проекта"),
+        }
+        presets = {
+            "basic": {
+                "view_channel": True,
+                "send_messages": True,
+                "read_message_history": True,
+                "add_reactions": True,
+                "attach_files": True,
+                "embed_links": True,
+                "connect": True,
+                "speak": True,
+                "use_application_commands": True,
+            },
+            "moderator": {
+                "moderate_members": True,
+                "manage_messages": True,
+            },
+            "admin": {
+                "kick_members": True,
+                "ban_members": True,
+                "moderate_members": True,
+                "manage_messages": True,
+                "view_audit_log": True,
+                "manage_nicknames": True,
+            },
+            "lead": {
+                "manage_roles": True,
+                "manage_channels": True,
+                "kick_members": True,
+                "ban_members": True,
+                "moderate_members": True,
+                "manage_messages": True,
+                "view_audit_log": True,
+                "manage_nicknames": True,
+            },
+            "owner": {
+                "manage_guild": True,
+                "manage_roles": True,
+                "manage_channels": True,
+                "kick_members": True,
+                "ban_members": True,
+                "moderate_members": True,
+                "manage_messages": True,
+                "view_audit_log": True,
+                "manage_nicknames": True,
+                "manage_threads": True,
+            },
+        }
+        roles_in_order = []
+        for spec in STAFF_ROLE_SPECS:
+            role = guild.get_role(ROLE_IDS[spec["key"]])
+            if role is None:
+                known_names = {*old_names[spec["key"]], spec["name"]}
+                role = next(
+                    (r for r in guild.roles
+                     if r.name.casefold() in {n.casefold() for n in known_names}),
+                    None,
+                )
+            if spec["permissions"] == "owner":
+                permissions = discord.Permissions.all()
+                permissions.administrator = False
+            else:
+                permissions = discord.Permissions(**presets[spec["permissions"]])
+            try:
+                if role is None:
+                    role = await guild.create_role(
+                        name=spec["name"],
+                        colour=discord.Colour(spec["color"]),
+                        permissions=permissions,
+                        hoist=True,
+                        mentionable=False,
+                        reason="Создание и настройка ролей WeriTime",
+                    )
+                    log.info("Created WeriTime role %s", spec["name"])
+                else:
+                    role = await role.edit(
+                        name=spec["name"],
+                        colour=discord.Colour(spec["color"]),
+                        permissions=permissions,
+                        hoist=True,
+                        mentionable=False,
+                        reason="Синхронизация ролей WeriTime",
+                    )
+                roles_in_order.append(role)
+            except discord.HTTPException:
+                log.exception("Could not create or configure role %s", spec["name"])
+                if role is not None:
+                    roles_in_order.append(role)
+
+        bot_member = guild.me
+        if bot_member and roles_in_order:
+            top_position = min(bot_member.top_role.position - 1, len(guild.roles) - 1)
+            if top_position >= len(roles_in_order):
+                positions = {
+                    role: top_position - index
+                    for index, role in enumerate(roles_in_order)
+                }
+                try:
+                    await guild.edit_role_positions(positions=positions)
+                except discord.HTTPException:
+                    log.exception("Could not arrange WeriTime roles; check the bot role position")
+            else:
+                log.warning(
+                    "Move the bot's highest role above the 13 WeriTime staff roles to set their order"
+                )
+
+    @staticmethod
     def is_staff_role(role: discord.Role) -> bool:
         """Проверяет, относится ли роль Discord к иерархии персонала."""
-        # Только точные ID ролей WeriGrief. Не трогаем донатные и прочие роли.
+        # Только точные ID ролей WeriTime. Не трогаем донатные и прочие роли.
         if role.id in STAFF_ROLE_IDS:
             return True
         normalized = role.name.casefold()
@@ -112,13 +285,17 @@ class StaffRoleManager:
             "creator", "gl.owner", "owner", "d.owner", "gl.curator", "curator",
             "z.curator", "gl.admin", "admin", "ml.admin", "d.admin", "gl.moder",
             "st.moder", "moder", "ml.moder", "d.moder", "helper", "d.helper",
+            "d.owner",
             "гл.разработчик", "разработчик", "pr manager", "сотрудник проекта",
+            "владелец", "со-владелец", "гл.куратор", "куратор", "зам.куратор",
+            "гл.админ", "админ", "мл.админ", "гл.модер", "модер", "мл.модер",
+            "стажер",
             "на испытании", "кандидат",
         }
 
     @staticmethod
     def find_staff_role_for_position(guild: discord.Guild, position: str) -> discord.Role | None:
-        """Ищет роль сначала по реальному ID WeriGrief, затем по точному имени роли."""
+        """Ищет роль сначала по реальному ID WeriTime, затем по точному имени роли."""
         pos = position.strip()
         pos_low = pos.casefold()
         role_id = POSITION_DISCORD_ROLES_MAP.get(pos_low)
@@ -129,15 +306,19 @@ class StaffRoleManager:
         # Некоторые должности присутствуют в требованиях, но в исходниках архива
         # для них нет ID. Не выдумываем ID — ищем точное имя на самом сервере.
         exact_names = {
-            "gl.owner": ("GL.OWNER",), "d.owner": ("D.OWNER",),
-            "gl.curator": ("GL.CURATOR",), "z.curator": ("Z.CURATOR",),
-            "gl.admin": ("GL.ADMIN",), "ml.admin": ("ML.ADMIN",), "d.admin": ("D.ADMIN",),
-            "gl.moder": ("GL.MODER",), "st.moder": ("ST.MODER",),
-            "ml.moder": ("ML.MODER",), "d.moder": ("D.MODER",),
-            "d.helper": ("D.HELPER",), "helper": ("HELPER",),
+            "gl.owner": ("💎・Со-Владелец", "Со-Владелец"), "d.owner": ("💎・Со-Владелец", "Со-Владелец"),
+            "gl.curator": ("🌟・Гл.Куратор", "Гл.Куратор"), "z.curator": ("✨・Зам.Куратор", "Зам.Куратор"),
+            "gl.admin": ("🛡️・Гл.Админ", "Гл.Админ"), "ml.admin": ("🔰・Мл.Админ", "Мл.Админ"),
+            "d.admin": ("⚔️・Админ", "Админ"), "gl.moder": ("🚨・Гл.Модер", "Гл.Модер"),
+            "st.moder": ("🔨・Модер", "Модер"), "ml.moder": ("🧹・Мл.Модер", "Мл.Модер"),
+            "d.moder": ("🔨・Модер", "Модер"), "d.helper": ("🤝・Стажер", "Стажер"),
+            "helper": ("🤝・Стажер", "Стажер"),
             "creator": ("CREATOR",), "developer": ("Разработчик",),
             "главный разработчик": ("Гл.Разработчик",),
             "pr manager": ("PR Manager",), "сотрудник проекта": ("Сотрудник проекта",),
+            "стажер": ("🤝・Стажер", "Стажер"), "owner": ("👑・Владелец", "Владелец"),
+            "curator": ("🔮・Куратор", "Куратор"), "admin": ("⚔️・Админ", "Админ"),
+            "moder": ("🔨・Модер", "Модер"),
             "на испытании": ("На испытании", "⚠️ На испытании"),
             "кандидат": ("Кандидат",),
         }
@@ -212,7 +393,9 @@ class StaffRoleManager:
         to_add: list[discord.Role] = []
 
         # Базовая роль персонала
-        base_role = guild.get_role(BASE_STAFF_ROLE_ID)
+        base_role = guild.get_role(BASE_STAFF_ROLE_ID) or discord.utils.get(
+            guild.roles, name="Сотрудник проекта"
+        )
         if base_role and base_role not in member.roles:
             if bot_member and base_role.position >= bot_top_pos:
                 blocked.append(base_role.name)
@@ -225,25 +408,32 @@ class StaffRoleManager:
         pos_role = cls.find_staff_role_for_position(guild, position)
         if pos_role is None:
             blocked.append(f"Discord-роль не настроена: {position}")
-        if pos_role and pos_role not in member.roles:
+        if pos_role and pos_role not in member.roles and pos_role not in to_add:
             if bot_member and pos_role.position >= bot_top_pos:
                 blocked.append(pos_role.name)
             else:
                 to_add.append(pos_role)
 
-        # Снятие предыдущей должности при повышении
-        if old_position:
-            old_role = cls.find_staff_role_for_position(guild, old_position)
-            if old_role and old_role in member.roles and old_role != pos_role:
-                if bot_member and old_role.position < bot_top_pos:
-                    try:
-                        await member.remove_roles(old_role, reason=f"Изменение должности: {old_position} -> {position}")
-                        log.info(f"Removed old role '{old_role.name}' from {member}")
-                    except Exception as e:
-                        blocked.append(old_role.name)
-                        log.warning(f"Failed to remove old role '{old_role.name}' from {member}: {e}")
-                else:
+        # Сверяем весь набор управляемых ролей с текущей должностью из таблицы.
+        # Базовая роль остаётся, а лишние должностные роли снимаются.
+        keep_ids = {r.id for r in (base_role, pos_role) if r is not None}
+        stale_roles = [
+            role for role in member.roles
+            if role.id in STAFF_ROLE_IDS and role.id not in keep_ids
+        ]
+        for old_role in stale_roles:
+            if bot_member and old_role.position < bot_top_pos:
+                try:
+                    await member.remove_roles(
+                        old_role,
+                        reason=reason if not old_position else f"Изменение должности: {old_position} -> {position}",
+                    )
+                    log.info("Removed stale staff role '%s' from %s", old_role.name, member)
+                except Exception as e:
                     blocked.append(old_role.name)
+                    log.warning("Failed to remove stale staff role '%s' from %s: %s", old_role.name, member, e)
+            else:
+                blocked.append(old_role.name)
 
         if to_add:
             try:
@@ -302,7 +492,11 @@ class MinecraftPermissionsManager:
                 if not socket_url or not token:
                     log.error("Pterodactyl response missing socket/token for server %s: %s", server_id, str(payload)[:500])
                     return False
-                async with session.ws_connect(socket_url, heartbeat=20) as ws:
+                async with session.ws_connect(
+                socket_url,
+                heartbeat=20,
+                headers={"Origin": PTERO_BASE_URL.rstrip("/")}
+            ) as ws:
                     await ws.send_json({"event": "auth", "args": [token]})
                     authenticated = False
                     deadline = asyncio.get_running_loop().time() + 8
@@ -359,7 +553,7 @@ class MinecraftPermissionsManager:
                     if output_lines:
                         joined = " | ".join(output_lines[-8:])
                         log.info("Minecraft console output from %s: %s", server_id, joined[:2000])
-                        if any(term in joined.casefold() for term in ("unknown command", "неизвестная команда", "not found", "no player was found", "player not found")):
+                        if any(term in joined.casefold() for term in ("unknown command", "неизвестная команда", "not found", "no player was found", "player not found", "a user for", "could not be found", "не найден")):
                             log.error("Minecraft rejected command on %s: %s", server_id, joined[:1000])
                             return False
                     return True
@@ -372,6 +566,8 @@ class MinecraftPermissionsManager:
         """Сопоставляет должность с группой LuckPerms; LP_GROUP_MAP из .env имеет приоритет."""
         import os
         pos_low = position.strip().casefold()
+        if pos_low in {"gl.curator", "gl curator", "gcurator", "гл.куратор", "гл куратор"}:
+            return ""
         try:
             custom = json.loads(os.getenv("LP_GROUP_MAP", "{}") or "{}")
             if isinstance(custom, dict):
@@ -411,23 +607,40 @@ class MinecraftPermissionsManager:
 
     @classmethod
     async def revoke_minecraft_permissions(cls, nick: str) -> bool:
-        """Сбрасывает группу LuckPerms игрока на default через консоль."""
+        """Снимает должностные группы LuckPerms на всех настроенных серверах."""
         from src.core.config import PTERO_SERVER_IDS
+
         clean_nick = re.sub(r"[^A-Za-z0-9_]", "", str(nick or ""))
-        if not clean_nick:
+        if not clean_nick or not PTERO_SERVER_IDS:
             return False
-        # Не используем `lp user clear`: он удаляет все персональные permission nodes.
-        # Сбрасываем только родительскую группу, сохраняя индивидуальные права игрока.
+
         commands = [
-            f"lp user {clean_nick} parent set default",
-            "lp sync",
+            f"lp user {clean_nick} parent remove {group}"
+            for group in sorted(ALL_LP_GROUPS)
         ]
-        success = False
+        commands.append("lp sync")
+
+        results = []
         for server_id in PTERO_SERVER_IDS:
-            if await MinecraftPermissionsManager._send_console_commands(server_id, commands):
-                success = True
-                log.info("LuckPerms revoke commands sent for %s on server %s", clean_nick, server_id)
-        return success
+            try:
+                server_ok = await cls._send_console_commands(server_id, commands)
+            except Exception:
+                log.exception(
+                    "LuckPerms revoke failed for %s on server %s",
+                    clean_nick,
+                    server_id,
+                )
+                server_ok = False
+
+            results.append(bool(server_ok))
+            log.info(
+                "LuckPerms revoke for %s on server %s: %s",
+                clean_nick,
+                server_id,
+                "commands sent" if server_ok else "FAILED",
+            )
+
+        return bool(results) and all(results)
 
     @staticmethod
     async def send_private_minecraft_warning(nick: str, reason: str, total_warns: int, source: str = "Персонал") -> bool:
@@ -441,7 +654,7 @@ class MinecraftPermissionsManager:
         safe_reason = str(reason or "Без указания причины")[:300]
         safe_source = str(source or "Персонал")[:60]
         message = (
-            f"[WeriGrief] Вам выдано предупреждение: {safe_reason}. "
+            f"[WeriTime] Вам выдано предупреждение: {safe_reason}. "
             f"Всего предупреждений: {int(total_warns)}. Раздел: {safe_source}."
         )
         tellraw = "tellraw " + clean_nick + " " + json.dumps(
